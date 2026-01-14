@@ -22,7 +22,7 @@ The goal is to show how a real-world backend service could safely expose Claude�
 
 
 ## Project Structure
-'''
+```
 computer-use-demo/
 ├── computer_use_demo/
 │   ├── api/                          # Orchestrator (FastAPI)
@@ -49,7 +49,7 @@ computer-use-demo/
 ├── LICENSE                           # MIT (Anthropic original license)
 ├── pyproject.toml                    # Tooling and lint configuration
 └── .gitignore
-'''
+```
 
 ### Key properties
 
