@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Claude Computer Use – SSE Demo</title>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #0f172a;
+      color: #e5e7eb;
+    }
+
+    header {
+      padding: 12px 16px;
+      background: #020617;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    main {
+      display: flex;
+      height: calc(100vh - 56px);
+    }
+
+    .left {
+      width: 420px;
+      border-right: 1px solid #1e293b;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .right {
+      flex: 1;
+      background: #020617;
+    }
+
+    #log {
+      flex: 1;
+      padding: 12px;
+      overflow-y: auto;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .event {
+      margin-bottom: 6px;
+    }
+
+    .event.ready { color: #38bdf8; }
+    .event.user { color: #fbbf24; }
+    .event.assistant { color: #22c55e; }
+    .event.error { color: #ef4444; }
+    .event.ping { color: #64748b; }
+
+    .controls {
+      border-top: 1px solid #1e293b;
+      padding: 10px;
+      display: flex;
+      gap: 8px;
+    }
+
+    input {
+      flex: 1;
+      background: #020617;
+      border: 1px solid #1e293b;
+      color: #e5e7eb;
+      padding: 6px 8px;
+    }
+
+    button {
+      background: #2563eb;
+      border: none;
+      color: white;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <strong>Claude Computer Use – Orchestrator + SSE Demo</strong>
+  </header>
+
+  <main>
+    <div class="left">
+      <div id="log"></div>
+
+      <div class="controls">
+        <input id="input" placeholder="Type a message…" />
+        <button id="send">Send</button>
+      </div>
+    </div>
+
+    <div class="right">
+      <iframe id="ui"></iframe>
+    </div>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
