@@ -24,6 +24,18 @@ from computer_use_demo.api.worker_manager import WorkerInfo, start_worker, stop_
 
 app = FastAPI(title="Computer Use Backend (Challenge)", version="0.1.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://[::]:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 SESSION_TTL_SECONDS = 300
 CLEANUP_EVERY_SECONDS = 30
 
