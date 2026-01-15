@@ -63,6 +63,22 @@ computer-use-demo/
 - Orchestrator is stateless aside from SQLite persistence
 - Workers can be horizontally scaled
 
+## Quick Start (Local)
+
+### Prerequisites
+- Docker
+- Python 3.10+
+- An Anthropic API key
+
+### Run the orchestrator
+
+```bash
+export ANTHROPIC_API_KEY="your_key_here"
+python -m uvicorn computer_use_demo.api.main:app --port 9000
+```
+
+
+
 ## 3. Orchestrator Responsibilities
 
 The orchestrator (FastAPI):
