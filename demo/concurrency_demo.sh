@@ -40,7 +40,7 @@ curl -s -X POST "$API/sessions/$SESSION_A/messages" \
   -H "Content-Type: application/json" \
   -d '{"text":"Search the weather in Dubai and tell me the temperature."}' >/dev/null &
 
-# Caso 2: Tokyo (y luego New York SIN esperar)
+# Caso 2: Tokyo (and then New York)
 curl -s -X POST "$API/sessions/$SESSION_B/messages" \
   -H "Content-Type: application/json" \
   -d '{"text":"Find the best sushi restaurant in Tokyo."}' >/dev/null &
@@ -50,9 +50,6 @@ echo " Messages sent."
 
 echo
 echo "▶ Now, while Tokyo is running, send New York on the SAME session B (non-blocking test)..."
-# Nota: si tu API marca busy=409, esto es EXACTAMENTE el punto del challenge:
-# debes mostrar concurrencia real con dos sesiones en paralelo.
-# Aquí demostramos: A y B en paralelo. Y dentro de B, ver si soporta "pipeline".
 curl -s -X POST "$API/sessions/$SESSION_B/messages" \
   -H "Content-Type: application/json" \
   -d '{"text":"Now, without waiting, also search the weather in New York."}' >/dev/null || true
