@@ -43,6 +43,11 @@ computer-use-demo/
 ├── image/
 │   └── entrypoint.sh                 # Worker container startup (VNC, Streamlit, API)
 │
+├── web/
+│    ├── app.js                
+│    └── index.html
+│    
+│
 ├── Dockerfile                        # Worker container image
 ├── README.md                         # Project documentation (this file)
 ├── README_CHALLENGE.md               # Optional challenge-specific notes
@@ -230,6 +235,34 @@ This prevents resource leaks and allows safe long-running operation.
 6. Verify containers start and stop correctly
 
 This demonstrates readiness for real-world multi-user deployments.
+
+## Frontend (HTML + SSE)
+
+A minimal frontend is included in the `web/` directory.
+
+This frontend is intentionally simple and framework-free.  
+Its purpose is **not UI polish**, but to demonstrate that:
+
+- The orchestrator can be consumed by a real browser client
+- Server-Sent Events (SSE) work end-to-end
+- The backend is frontend-agnostic
+- No Streamlit or Swagger UI is required to use the system
+
+### What it demonstrates
+
+- Creating a session via REST
+- Sending user messages
+- Receiving live assistant output via SSE (`EventSource`)
+- Handling `assistant_block`, `done`, `error`, and `ping` events
+
+This proves that the system can be integrated into:
+- Web dashboards
+- Admin panels
+- Customer-facing UIs
+- Other backend services
+
+The combined `/sessions/{id}/ui` endpoint is provided only as a **demo convenience** and debugging tool.
+
 
 ## 12. Final Notes
 
