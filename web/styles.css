@@ -78,8 +78,21 @@ button:disabled,
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  margin-bottom: 10px;
   text-transform: uppercase;
+}
+
+.sessions-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.small-button {
+  background: #1e293b;
+  border-color: #334155;
+  font-size: 12px;
+  padding: 5px 8px;
 }
 
 .session {

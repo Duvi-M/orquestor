@@ -12,6 +12,7 @@ const input = document.getElementById("message");
 const sendBtn = document.getElementById("send");
 const historyBtn = document.getElementById("load-history");
 const novncLink = document.getElementById("novnc-link");
+const clearSessionsBtn = document.getElementById("clear-sessions");
 const STORAGE_KEY = "computer-use-orchestrator.sessions";
 
 function shortId(id) {
@@ -74,6 +75,20 @@ function persistSessions() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
 }
 
+function removeSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (session?.eventSource) {
+    session.eventSource.close();
+  }
+  sessions.delete(sessionId);
+  if (activeSessionId === sessionId) {
+    activeSessionId = null;
+    setActiveSession(sessions.keys().next().value || null);
+  }
+  persistSessions();
+  renderSessions();
+}
+
 function restoreSessions() {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return;
@@ -90,7 +105,6 @@ function restoreSessions() {
         eventSource: null,
       };
       sessions.set(item.id, session);
-      connectEvents(session);
     }
     const first = sessions.keys().next().value;
     if (first) setActiveSession(first);
@@ -119,6 +133,14 @@ function addEvent(sessionId, name, data, fromHistory = false) {
 }
 
 function setActiveSession(sessionId) {
+  if (activeSessionId && activeSessionId !== sessionId) {
+    const previous = sessions.get(activeSessionId);
+    if (previous?.eventSource) {
+      previous.eventSource.close();
+      previous.eventSource = null;
+    }
+  }
+
   activeSessionId = sessionId;
   const session = sessions.get(sessionId);
 
@@ -130,6 +152,7 @@ function setActiveSession(sessionId) {
   if (session) {
     novncLink.href = session.novncUrl;
     novncLink.classList.remove("disabled");
+    ensureSessionExists(session);
   } else {
     novncLink.href = "#";
     novncLink.classList.add("disabled");
@@ -144,12 +167,36 @@ function setActiveSession(sessionId) {
   renderSessions();
 }
 
+async function ensureSessionExists(session) {
+  try {
+    const response = await fetch(`${API_BASE}/sessions/${session.id}`);
+    if (response.status === 404) {
+      removeSession(session.id);
+      return false;
+    }
+    if (!response.ok) return false;
+    connectEvents(session);
+    return true;
+  } catch (error) {
+    addEvent(session.id, "error", { message: `Session check failed: ${error.message}` });
+    return false;
+  }
+}
+
 function connectEvents(session) {
   if (session.eventSource) {
     session.eventSource.close();
   }
 
   session.eventSource = new EventSource(`${API_BASE}/sessions/${session.id}/events`);
+
+  session.eventSource.onerror = () => {
+    addEvent(session.id, "error", { message: "SSE connection lost or session no longer exists" });
+    if (session.eventSource) {
+      session.eventSource.close();
+      session.eventSource = null;
+    }
+  };
 
   const names = [
     "ready",
@@ -207,6 +254,9 @@ async function sendMessage(event) {
   sendBtn.disabled = true;
 
   try {
+    const exists = await ensureSessionExists(session);
+    if (!exists) throw new Error("Session no longer exists");
+
     const response = await fetch(`${API_BASE}/sessions/${session.id}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -231,6 +281,10 @@ async function loadHistory() {
   const response = await fetch(`${API_BASE}/sessions/${session.id}/history`);
   const data = await response.json();
   if (!response.ok) {
+    if (response.status === 404) {
+      removeSession(session.id);
+      return;
+    }
     addEvent(session.id, "error", { message: data.detail || "Failed to load history" });
     return;
   }
@@ -245,7 +299,20 @@ async function loadHistory() {
   renderSessions();
 }
 
+function clearLocalSessions() {
+  for (const session of sessions.values()) {
+    if (session.eventSource) {
+      session.eventSource.close();
+    }
+  }
+  sessions.clear();
+  activeSessionId = null;
+  localStorage.removeItem(STORAGE_KEY);
+  setActiveSession(null);
+}
+
 createBtn.onclick = createSession;
 historyBtn.onclick = loadHistory;
+clearSessionsBtn.onclick = clearLocalSessions;
 form.onsubmit = sendMessage;
 restoreSessions();

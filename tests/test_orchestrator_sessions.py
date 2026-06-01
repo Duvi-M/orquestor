@@ -78,3 +78,67 @@ async def test_one_active_task_per_session(monkeypatch):
     assert exc.value.status_code == 409
 
     await main.SESSIONS[session_id].task
+
+
+async def test_worker_event_persistence_used_by_sse_does_not_raise_name_error():
+    session_id = "session-sse"
+    main.insert_session(session_id)
+
+    main._persist_worker_event(session_id, "ready", {"ok": True})
+
+    history = main.get_session_history(session_id)
+    assert history is not None
+    assert history["events"][0]["event"] == "ready"
+    assert history["events"][0]["data"] == {"ok": True}
+
+
+async def test_worker_status_timeout_does_not_mark_running_session_failed(monkeypatch):
+    session_id = "session-timeout"
+    session = main.SessionState(
+        session_id=session_id,
+        worker=WorkerInfo(
+            name="worker-timeout",
+            host="127.0.0.1",
+            vnc=5900,
+            novnc=6080,
+            streamlit=8501,
+            http=8080,
+        ),
+    )
+    main.SESSIONS[session_id] = session
+    main.insert_session(session_id)
+    main.update_session_status(session_id, "running")
+    monkeypatch.setattr(main, "WORKER_STATUS_POLL_SECONDS", 0.01)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    async def timeout_status(_session):
+        raise main.httpx.ReadTimeout("status timed out")
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(main, "_get_worker_status", timeout_status)
+
+    task = asyncio.create_task(main._run_worker_message(session_id, session, "hello"))
+    await asyncio.sleep(0.05)
+    main._persist_worker_event(session_id, "done", {"ok": True})
+    await task
+
+    history = main.get_session_history(session_id)
+    assert history is not None
+    assert history["session"]["status"] == "completed"
+    assert history["session"]["error"] is None

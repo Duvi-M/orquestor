@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from computer_use_demo.api.db import (
     get_session_history,
     init_db,
+    insert_event,
     insert_message,
     insert_session,
     update_session_activity,
@@ -46,6 +47,7 @@ CLEANUP_EVERY_SECONDS = 30
 
 WORKER_READY_TIMEOUT_SECONDS = 25.0
 WORKER_READY_POLL_SECONDS = 0.5
+WORKER_STATUS_POLL_SECONDS = 2.0
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
 
 
@@ -58,6 +60,7 @@ class SessionState:
     session_id: str
     task: asyncio.Task | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    completion_event: asyncio.Event = field(default_factory=asyncio.Event)
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     worker: WorkerInfo | None = None
@@ -162,7 +165,7 @@ async def _get_worker_status(s: SessionState) -> dict[str, Any]:
     if not s.worker:
         return {"busy": False, "status": "missing_worker"}
 
-    async with httpx.AsyncClient(timeout=2.0) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(f"http://{s.worker.host}:{s.worker.http}/status")
         response.raise_for_status()
         data = response.json()
@@ -175,6 +178,7 @@ async def _run_worker_message(session_id: str, s: SessionState, text: str) -> No
         return
 
     try:
+        logger.info("Orchestrator forwarding message for session %s", session_id)
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"http://{s.worker.host}:{s.worker.http}/messages",
@@ -183,8 +187,24 @@ async def _run_worker_message(session_id: str, s: SessionState, text: str) -> No
             response.raise_for_status()
 
         while True:
-            await asyncio.sleep(0.5)
-            status = await _get_worker_status(s)
+            try:
+                await asyncio.wait_for(
+                    s.completion_event.wait(),
+                    timeout=WORKER_STATUS_POLL_SECONDS,
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            try:
+                status = await _get_worker_status(s)
+            except httpx.ReadTimeout:
+                logger.info(
+                    "Worker status timed out for session %s; continuing to wait for SSE completion",
+                    session_id,
+                )
+                continue
+
             if status.get("busy"):
                 continue
 
@@ -209,21 +229,34 @@ async def _run_worker_message(session_id: str, s: SessionState, text: str) -> No
 
 
 def _persist_worker_event(session_id: str, event_name: str, data: dict[str, Any]) -> None:
-    insert_event(session_id, event_name, data)
+    try:
+        insert_event(session_id, event_name, data)
 
-    if event_name == "assistant_block":
-        text = str(data.get("text") or "")
-        if text:
-            insert_message(session_id, "assistant", text)
-    elif event_name == "error":
-        update_session_status(
+        if event_name == "assistant_block":
+            text = str(data.get("text") or "")
+            if text:
+                insert_message(session_id, "assistant", text)
+        elif event_name == "error":
+            update_session_status(
+                session_id,
+                "error",
+                str(data.get("message") or data.get("error") or "Worker error"),
+                completed=True,
+            )
+            session = SESSIONS.get(session_id)
+            if session:
+                session.completion_event.set()
+        elif event_name == "done":
+            update_session_status(session_id, "completed", completed=True)
+            session = SESSIONS.get(session_id)
+            if session:
+                session.completion_event.set()
+    except Exception:
+        logger.exception(
+            "Failed to persist worker event %s for session %s",
+            event_name,
             session_id,
-            "error",
-            str(data.get("message") or data.get("error") or "Worker error"),
-            completed=True,
         )
-    elif event_name == "done":
-        update_session_status(session_id, "completed", completed=True)
 
 
 @app.post("/sessions")
@@ -421,12 +454,15 @@ async def post_message(session_id: str, body: UserMessageIn) -> dict[str, Any]:
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
 
+    logger.info("Orchestrator received user message for session %s", session_id)
+
     async with s.lock:
         if _session_busy(s):
             raise HTTPException(status_code=409, detail="Session is busy")
 
         insert_message(session_id, "user", text)
         update_session_status(session_id, "running")
+        s.completion_event.clear()
         s.task = asyncio.create_task(_run_worker_message(session_id, s, text))
 
     return {"ok": True, "status": "running"}

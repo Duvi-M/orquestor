@@ -5,7 +5,7 @@ set -euo pipefail
 ./novnc_startup.sh
 
 echo "[entrypoint] starting worker api on :8080..."
-python -m uvicorn computer_use_demo.worker_api:app --host 0.0.0.0 --port 8080 > /tmp/worker_api.log 2>&1 &
+python -m uvicorn computer_use_demo.worker_api:app --host 0.0.0.0 --port 8080 &
 WORKER_PID=$!
 
 if [[ "${ENABLE_STREAMLIT:-false}" == "true" ]]; then
@@ -20,6 +20,5 @@ echo "➡️  worker API: :8080 | noVNC: :6080"
 wait $WORKER_PID
 
 echo "[entrypoint] worker api exited. Dumping logs..."
-tail -n 200 /tmp/worker_api.log || true
 tail -n 200 /tmp/streamlit_stdout.log || true
 exit 1

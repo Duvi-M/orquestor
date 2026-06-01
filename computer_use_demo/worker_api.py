@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from anthropic.types.beta import BetaMessageParam, BetaTextBlockParam
 from computer_use_demo.loop import APIProvider, sampling_loop
+from computer_use_demo.tools import TOOL_GROUPS_BY_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ def _sse_pack(event: str, data: dict, event_id: int | None = None) -> str:
 
 
 async def _emit(event: str, data: dict) -> None:
+    logger.info("Worker emitted event: %s", event)
     evt = {"id": STATE.next_event_id, "event": event, "data": data}
     STATE.next_event_id += 1
     STATE.event_log.append(evt)
@@ -95,10 +97,12 @@ def _emit_content_block(block: Any) -> None:
         if isinstance(block, dict) and block.get("type") == "text":
             # text delta
             text = block.get("text", "")
+            logger.info("Worker received assistant text block")
             asyncio.create_task(_emit("assistant_block", {"type": "text", "text": text}))
             return
 
         if isinstance(block, dict) and block.get("type") == "tool_use":
+            logger.info("Worker received tool use block: %s", block.get("name"))
             asyncio.create_task(
                 _emit(
                     "tool_use_start",
@@ -112,10 +116,10 @@ def _emit_content_block(block: Any) -> None:
             return
 
         # fallback: forward as debug event (optional)
+        logger.info("Worker received debug content block: %s", getattr(block, "type", "unknown"))
         asyncio.create_task(_emit("debug", {"block": block}))
     except Exception:
-        # don't crash worker on serialization errors
-        pass
+        logger.exception("Failed to emit content block")
 
 
 def _emit_tool_result(result: Any, tool_use_id: str) -> None:
@@ -135,6 +139,7 @@ def _emit_tool_result(result: Any, tool_use_id: str) -> None:
             if hasattr(result, "output") and result.output:
                 payload["output"] = str(result.output)[:4000]
         asyncio.create_task(_emit("tool_result", payload))
+        logger.info("Worker emitted tool result for %s", tool_use_id)
         if hasattr(result, "base64_image") and result.base64_image:
             asyncio.create_task(
                 _emit(
@@ -190,7 +195,14 @@ async def post_message(body: MessageIn):
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
+        await _emit("error", {"message": "ANTHROPIC_API_KEY not set in worker"})
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in worker")
+
+    tool_version = os.getenv("TOOL_VERSION", "computer_use_20250124")
+    if tool_version not in TOOL_GROUPS_BY_VERSION:
+        message = f"Unsupported TOOL_VERSION: {tool_version}"
+        await _emit("error", {"message": message})
+        raise HTTPException(status_code=500, detail=message)
 
     # If first message, initialize conversation
     if not STATE.messages:
@@ -198,6 +210,7 @@ async def post_message(body: MessageIn):
 
     STATE.status = "running"
     STATE.error = None
+    logger.info("Worker received message: %s", text)
 
     async def _run():
         try:
@@ -211,24 +224,49 @@ async def post_message(body: MessageIn):
                 }
             )
 
-            # Run real loop
+            api_errors: list[str] = []
+
+            def api_response_callback(_request, _response, exception) -> None:
+                if exception is None:
+                    return
+                message = f"Claude API error: {exception}"
+                api_errors.append(message)
+                logger.error(
+                    "Claude API error during worker task",
+                    exc_info=(type(exception), exception, exception.__traceback__),
+                )
+
+            model = os.getenv("MODEL", "claude-sonnet-4-5-20250929")
+            max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
+
+            logger.info(
+                "Worker starting Claude computer-use loop model=%s tool_version=%s max_tokens=%s",
+                model,
+                tool_version,
+                max_tokens,
+            )
+
             STATE.messages = await sampling_loop(
                 system_prompt_suffix="",
-                model=os.getenv("MODEL", "claude-sonnet-4-5-20250929"),
+                model=model,
                 provider=APIProvider.ANTHROPIC,
                 messages=STATE.messages,
                 output_callback=_emit_content_block,
                 tool_output_callback=_emit_tool_result,
-                api_response_callback=lambda *_args, **_kw: None,
+                api_response_callback=api_response_callback,
                 api_key=api_key,
                 only_n_most_recent_images=3,
-                tool_version=os.getenv("TOOL_VERSION", "computer_use_20250124"),
-                max_tokens=int(os.getenv("MAX_TOKENS", "4096")),
+                tool_version=tool_version,
+                max_tokens=max_tokens,
                 thinking_budget=None,
                 token_efficient_tools_beta=False,
             )
 
+            if api_errors:
+                raise RuntimeError(api_errors[-1])
+
             STATE.status = "done"
+            logger.info("Worker completed Claude computer-use loop")
             await _emit("done", {"ok": True})
         except Exception as e:
             STATE.status = "error"
