@@ -1,92 +1,251 @@
-const API_BASE = "http://127.0.0.1:9000";
+const API_BASE = window.API_BASE || "http://127.0.0.1:9000";
 
-let sessionId = null;
-let eventSource = null;
-let lastEventId = null;
+const sessions = new Map();
+let activeSessionId = null;
 
-const log = document.getElementById("log");
-const input = document.getElementById("input");
+const createBtn = document.getElementById("create-session");
+const sessionsEl = document.getElementById("sessions");
+const activeSessionEl = document.getElementById("active-session");
+const eventsEl = document.getElementById("events");
+const form = document.getElementById("message-form");
+const input = document.getElementById("message");
 const sendBtn = document.getElementById("send");
-const iframe = document.getElementById("ui");
+const historyBtn = document.getElementById("load-history");
+const novncLink = document.getElementById("novnc-link");
+const STORAGE_KEY = "computer-use-orchestrator.sessions";
 
-function addLog(text, cls) {
-  const div = document.createElement("div");
-  div.className = `event ${cls}`;
-  div.textContent = text;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
+function shortId(id) {
+  return id ? id.slice(0, 8) : "none";
+}
+
+function eventClass(name) {
+  if (name === "error") return "error";
+  if (name === "assistant_block") return "assistant";
+  if (name === "user_message") return "user";
+  if (name === "done" || name === "ready") return "ready";
+  if (name === "ping") return "muted";
+  return "tool";
+}
+
+function describeEvent(name, data) {
+  if (name === "assistant_block") return data.text || "";
+  if (name === "user_message") return data.text || "";
+  if (name === "tool_use_start") return `${data.name || "tool"} ${JSON.stringify(data.input || {})}`;
+  if (name === "tool_result") return data.error || data.output || "tool completed";
+  if (name === "screenshot") return "screen updated";
+  if (name === "error") return data.message || data.error || "error";
+  if (name === "done") return "task completed";
+  if (name === "ready") return "stream connected";
+  return JSON.stringify(data);
+}
+
+function renderEventRow(name, data, fromHistory = false) {
+  const row = document.createElement("div");
+  row.className = `event ${eventClass(name)}`;
+
+  const label = document.createElement("strong");
+  label.textContent = fromHistory ? `${name} · history` : name;
+
+  const body = document.createElement("span");
+  body.textContent = describeEvent(name, data);
+
+  row.append(label, body);
+  eventsEl.appendChild(row);
+  eventsEl.scrollTop = eventsEl.scrollHeight;
+}
+
+function renderSessions() {
+  sessionsEl.innerHTML = "";
+  for (const session of sessions.values()) {
+    const button = document.createElement("button");
+    button.className = `session ${session.id === activeSessionId ? "active" : ""}`;
+    button.textContent = `${shortId(session.id)} · ${session.status || "created"}`;
+    button.onclick = () => setActiveSession(session.id);
+    sessionsEl.appendChild(button);
+  }
+}
+
+function persistSessions() {
+  const serializable = [...sessions.values()].map((session) => ({
+    id: session.id,
+    novncUrl: session.novncUrl,
+    status: session.status,
+  }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
+}
+
+function restoreSessions() {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (!raw) return;
+
+  try {
+    const saved = JSON.parse(raw);
+    for (const item of saved) {
+      if (!item.id || !item.novncUrl) continue;
+      const session = {
+        id: item.id,
+        novncUrl: item.novncUrl,
+        status: item.status || "restored",
+        events: [],
+        eventSource: null,
+      };
+      sessions.set(item.id, session);
+      connectEvents(session);
+    }
+    const first = sessions.keys().next().value;
+    if (first) setActiveSession(first);
+  } catch {
+    localStorage.removeItem(STORAGE_KEY);
+  }
+}
+
+function addEvent(sessionId, name, data, fromHistory = false) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  session.events.push({ name, data });
+  if (name === "done") session.status = "done";
+  if (name === "error") session.status = "error";
+  if (name === "user_message") session.status = "running";
+  persistSessions();
+
+  if (sessionId !== activeSessionId) {
+    renderSessions();
+    return;
+  }
+
+  renderEventRow(name, data, fromHistory);
+  renderSessions();
+}
+
+function setActiveSession(sessionId) {
+  activeSessionId = sessionId;
+  const session = sessions.get(sessionId);
+
+  activeSessionEl.textContent = session ? session.id : "None";
+  input.disabled = !session;
+  sendBtn.disabled = !session;
+  historyBtn.disabled = !session;
+
+  if (session) {
+    novncLink.href = session.novncUrl;
+    novncLink.classList.remove("disabled");
+  } else {
+    novncLink.href = "#";
+    novncLink.classList.add("disabled");
+  }
+
+  eventsEl.innerHTML = "";
+  if (session) {
+    for (const event of session.events) {
+      renderEventRow(event.name, event.data);
+    }
+  }
+  renderSessions();
+}
+
+function connectEvents(session) {
+  if (session.eventSource) {
+    session.eventSource.close();
+  }
+
+  session.eventSource = new EventSource(`${API_BASE}/sessions/${session.id}/events`);
+
+  const names = [
+    "ready",
+    "user_message",
+    "assistant_block",
+    "tool_use_start",
+    "tool_result",
+    "screenshot",
+    "done",
+    "error",
+    "ping",
+  ];
+
+  for (const name of names) {
+    session.eventSource.addEventListener(name, (event) => {
+      const data = event.data ? JSON.parse(event.data) : {};
+      addEvent(session.id, name, data);
+    });
+  }
 }
 
 async function createSession() {
-  const res = await fetch(`${API_BASE}/sessions`, {
-    method: "POST"
-  });
-  const data = await res.json();
+  createBtn.disabled = true;
+  try {
+    const response = await fetch(`${API_BASE}/sessions`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Failed to create session");
 
-  sessionId = data.session_id;
+    const session = {
+      id: data.session_id,
+      novncUrl: data.novnc_url,
+      status: "ready",
+      events: [],
+      eventSource: null,
+    };
 
-  addLog(`Session created: ${sessionId}`, "ready");
-
-  iframe.src = data.ui_url;
-
-  connectSSE();
-}
-
-function connectSSE() {
-  let url = `${API_BASE}/sessions/${sessionId}/events`;
-  if (lastEventId) {
-    url += "";
+    sessions.set(session.id, session);
+    persistSessions();
+    connectEvents(session);
+    setActiveSession(session.id);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    createBtn.disabled = false;
   }
-
-  eventSource = new EventSource(url);
-
-  eventSource.onmessage = (e) => {
-    lastEventId = e.lastEventId || lastEventId;
-  };
-
-  eventSource.addEventListener("ready", (e) => {
-    addLog("SSE connected", "ready");
-  });
-
-  eventSource.addEventListener("user_message", (e) => {
-    const data = JSON.parse(e.data);
-    addLog(`User: ${data.text}`, "user");
-  });
-
-  eventSource.addEventListener("assistant_block", (e) => {
-    const data = JSON.parse(e.data);
-    addLog(`Assistant: ${data.text}`, "assistant");
-  });
-
-  eventSource.addEventListener("done", () => {
-    addLog("Done", "ready");
-  });
-
-  eventSource.addEventListener("error", (e) => {
-    addLog("Error event received", "error");
-  });
-
-  eventSource.addEventListener("ping", () => {
-    addLog("ping", "ping");
-  });
 }
 
-async function sendMessage() {
+async function sendMessage(event) {
+  event.preventDefault();
+  const session = sessions.get(activeSessionId);
   const text = input.value.trim();
-  if (!text) return;
+  if (!session || !text) return;
 
   input.value = "";
+  sendBtn.disabled = true;
 
-  await fetch(`${API_BASE}/sessions/${sessionId}/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text })
-  });
+  try {
+    const response = await fetch(`${API_BASE}/sessions/${session.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Failed to send message");
+    session.status = "running";
+    persistSessions();
+    renderSessions();
+  } catch (error) {
+    addEvent(session.id, "error", { message: error.message });
+  } finally {
+    sendBtn.disabled = false;
+  }
 }
 
-sendBtn.onclick = sendMessage;
-input.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") sendMessage();
-});
+async function loadHistory() {
+  const session = sessions.get(activeSessionId);
+  if (!session) return;
 
-createSession();
+  const response = await fetch(`${API_BASE}/sessions/${session.id}/history`);
+  const data = await response.json();
+  if (!response.ok) {
+    addEvent(session.id, "error", { message: data.detail || "Failed to load history" });
+    return;
+  }
+
+  eventsEl.innerHTML = "";
+  session.events = [];
+  session.status = data.session.status;
+  persistSessions();
+  for (const event of data.events) {
+    addEvent(session.id, event.event, event.data, true);
+  }
+  renderSessions();
+}
+
+createBtn.onclick = createSession;
+historyBtn.onclick = loadHistory;
+form.onsubmit = sendMessage;
+restoreSessions();

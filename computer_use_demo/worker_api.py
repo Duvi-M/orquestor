@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 from anthropic.types.beta import BetaMessageParam, BetaTextBlockParam
 from computer_use_demo.loop import APIProvider, sampling_loop
 
+logger = logging.getLogger(__name__)
 
 # App
 app = FastAPI(title="Worker API", version="0.1.0")
@@ -28,6 +30,8 @@ class WorkerState:
     queue: "asyncio.Queue[dict]" = field(default_factory=asyncio.Queue)
     task: Optional[asyncio.Task] = None
     messages: list[BetaMessageParam] = field(default_factory=list)
+    status: str = "idle"
+    error: str | None = None
 
     # SSE replay
     next_event_id: int = 1
@@ -97,7 +101,7 @@ def _emit_content_block(block: Any) -> None:
         if isinstance(block, dict) and block.get("type") == "tool_use":
             asyncio.create_task(
                 _emit(
-                    "tool_use",
+                    "tool_use_start",
                     {
                         "id": block.get("id"),
                         "name": block.get("name"),
@@ -131,14 +135,35 @@ def _emit_tool_result(result: Any, tool_use_id: str) -> None:
             if hasattr(result, "output") and result.output:
                 payload["output"] = str(result.output)[:4000]
         asyncio.create_task(_emit("tool_result", payload))
+        if hasattr(result, "base64_image") and result.base64_image:
+            asyncio.create_task(
+                _emit(
+                    "screenshot",
+                    {
+                        "tool_use_id": tool_use_id,
+                        "image_base64": result.base64_image,
+                    },
+                )
+            )
     except Exception:
-        pass
+        logger.exception("Failed to emit tool result")
 
 
 # Routes
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.get("/status")
+async def status():
+    return {
+        "busy": bool(STATE.task and not STATE.task.done()),
+        "status": STATE.status,
+        "error": STATE.error,
+        "messages": len(STATE.messages),
+        "events": len(STATE.event_log),
+    }
 
 
 @app.get("/events")
@@ -159,6 +184,10 @@ async def post_message(body: MessageIn):
     if STATE.task and not STATE.task.done():
         raise HTTPException(status_code=409, detail="Worker is busy")
 
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in worker")
@@ -167,15 +196,18 @@ async def post_message(body: MessageIn):
     if not STATE.messages:
         STATE.messages = []
 
+    STATE.status = "running"
+    STATE.error = None
+
     async def _run():
         try:
-            await _emit("user_message", {"text": body.text})
+            await _emit("user_message", {"text": text})
 
             # Append user message
             STATE.messages.append(
                 {
                     "role": "user",
-                    "content": [BetaTextBlockParam(type="text", text=body.text)],
+                    "content": [BetaTextBlockParam(type="text", text=text)],
                 }
             )
 
@@ -196,9 +228,13 @@ async def post_message(body: MessageIn):
                 token_efficient_tools_beta=False,
             )
 
+            STATE.status = "done"
             await _emit("done", {"ok": True})
         except Exception as e:
+            STATE.status = "error"
+            STATE.error = str(e)
+            logger.exception("Worker task failed")
             await _emit("error", {"message": str(e)})
 
     STATE.task = asyncio.create_task(_run())
-    return {"ok": True}
+    return {"ok": True, "status": "running"}

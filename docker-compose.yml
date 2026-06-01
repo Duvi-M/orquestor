@@ -1,0 +1,31 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    image: computer-use-orchestrator:local
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY}
+      COMPUTER_USE_DB_PATH: /app/data/orchestrator.db
+      PUBLIC_HOST: 127.0.0.1
+      WORKER_CONNECT_HOST: host.docker.internal
+      MODEL: ${MODEL:-claude-sonnet-4-5-20250929}
+      TOOL_VERSION: ${TOOL_VERSION:-computer_use_20250124}
+      MAX_TOKENS: ${MAX_TOKENS:-4096}
+      ENABLE_STREAMLIT: ${ENABLE_STREAMLIT:-false}
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    image: nginx:1.27-alpine
+    ports:
+      - "5173:80"
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+    depends_on:
+      - orchestrator

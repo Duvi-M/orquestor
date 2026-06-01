@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 import uuid
@@ -10,17 +11,21 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from computer_use_demo.api.db import (
+    get_session_history,
     init_db,
-    insert_event,
     insert_message,
     insert_session,
     update_session_activity,
+    update_session_status,
 )
 from computer_use_demo.api.worker_manager import WorkerInfo, start_worker, stop_worker
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Computer Use Backend (Challenge)", version="0.1.0")
 
@@ -41,6 +46,7 @@ CLEANUP_EVERY_SECONDS = 30
 
 WORKER_READY_TIMEOUT_SECONDS = 25.0
 WORKER_READY_POLL_SECONDS = 0.5
+PUBLIC_HOST = os.getenv("PUBLIC_HOST", "127.0.0.1")
 
 
 class UserMessageIn(BaseModel):
@@ -51,6 +57,7 @@ class UserMessageIn(BaseModel):
 class SessionState:
     session_id: str
     task: asyncio.Task | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     worker: WorkerInfo | None = None
@@ -84,6 +91,7 @@ async def _cleanup_sessions_loop() -> None:
         for sid in expired:
             s = SESSIONS.pop(sid, None)
             if s and s.worker:
+                logger.info("Cleaning up expired session %s", sid)
                 stop_worker(s.worker.name)
 
         await asyncio.sleep(CLEANUP_EVERY_SECONDS)
@@ -122,8 +130,8 @@ def _parse_sse_block(block: str) -> tuple[str | None, dict[str, Any] | None, str
         return event_name, {"raw": raw}, event_id
 
 
-async def _wait_worker_ready(worker_http_port: int) -> None:
-    url = f"http://127.0.0.1:{worker_http_port}/health"
+async def _wait_worker_ready(worker_host: str, worker_http_port: int) -> None:
+    url = f"http://{worker_host}:{worker_http_port}/health"
     deadline = time.time() + WORKER_READY_TIMEOUT_SECONDS
 
     async with httpx.AsyncClient(timeout=2.0) as client:
@@ -142,7 +150,80 @@ async def _wait_worker_ready(worker_http_port: int) -> None:
 @app.on_event("startup")
 async def startup() -> None:
     init_db()
+    logger.info("Orchestrator started")
     asyncio.create_task(_cleanup_sessions_loop())
+
+
+def _session_busy(s: SessionState) -> bool:
+    return bool(s.task and not s.task.done())
+
+
+async def _get_worker_status(s: SessionState) -> dict[str, Any]:
+    if not s.worker:
+        return {"busy": False, "status": "missing_worker"}
+
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        response = await client.get(f"http://{s.worker.host}:{s.worker.http}/status")
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, dict) else {"busy": False, "status": "unknown"}
+
+
+async def _run_worker_message(session_id: str, s: SessionState, text: str) -> None:
+    if not s.worker:
+        update_session_status(session_id, "error", "Worker not started", completed=True)
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"http://{s.worker.host}:{s.worker.http}/messages",
+                json={"text": text},
+            )
+            response.raise_for_status()
+
+        while True:
+            await asyncio.sleep(0.5)
+            status = await _get_worker_status(s)
+            if status.get("busy"):
+                continue
+
+            worker_status = str(status.get("status") or "idle")
+            if worker_status == "error":
+                update_session_status(
+                    session_id,
+                    "error",
+                    str(status.get("error") or "Worker task failed"),
+                    completed=True,
+                )
+            elif worker_status in {"done", "idle"}:
+                update_session_status(session_id, "completed", completed=True)
+            else:
+                update_session_status(session_id, worker_status, completed=True)
+            break
+    except Exception as exc:
+        logger.exception("Worker message failed for session %s", session_id)
+        update_session_status(session_id, "error", str(exc), completed=True)
+    finally:
+        _touch(s)
+
+
+def _persist_worker_event(session_id: str, event_name: str, data: dict[str, Any]) -> None:
+    insert_event(session_id, event_name, data)
+
+    if event_name == "assistant_block":
+        text = str(data.get("text") or "")
+        if text:
+            insert_message(session_id, "assistant", text)
+    elif event_name == "error":
+        update_session_status(
+            session_id,
+            "error",
+            str(data.get("message") or data.get("error") or "Worker error"),
+            completed=True,
+        )
+    elif event_name == "done":
+        update_session_status(session_id, "completed", completed=True)
 
 
 @app.post("/sessions")
@@ -154,17 +235,32 @@ async def create_session() -> dict[str, Any]:
     session_id = str(uuid.uuid4())
     s = SessionState(session_id=session_id)
 
-    s.worker = start_worker(session_id=session_id, api_key=api_key)
+    try:
+        s.worker = start_worker(session_id=session_id, api_key=api_key)
+    except RuntimeError as exc:
+        logger.exception("Failed to start worker for session %s", session_id)
+        raise HTTPException(status_code=500, detail="Failed to start worker") from exc
+
     SESSIONS[session_id] = s
     insert_session(session_id)
 
-    await _wait_worker_ready(s.worker.http)
+    try:
+        await _wait_worker_ready(s.worker.host, s.worker.http)
+    except HTTPException:
+        logger.exception("Worker did not become ready for session %s", session_id)
+        stop_worker(s.worker.name)
+        SESSIONS.pop(session_id, None)
+        update_session_status(session_id, "error", "Worker did not become ready", completed=True)
+        raise
 
+    update_session_status(session_id, "ready")
+    logger.info("Created session %s with worker %s", session_id, s.worker.name)
     return {
         "session_id": session_id,
-        "ui_url": f"http://127.0.0.1:9000/sessions/{session_id}/ui",
-        "novnc_url": f"http://127.0.0.1:{s.worker.novnc}/vnc.html",
-        "streamlit_url": f"http://127.0.0.1:{s.worker.streamlit}",
+        "ui_url": f"http://{PUBLIC_HOST}:9000/sessions/{session_id}/ui",
+        "novnc_url": f"http://{PUBLIC_HOST}:{s.worker.novnc}/vnc.html",
+        "streamlit_url": None,
+        "legacy_streamlit_enabled": False,
         "worker_http": f"http://127.0.0.1:{s.worker.http}",
     }
 
@@ -175,19 +271,24 @@ async def delete_session(session_id: str) -> dict[str, Any]:
     if s.worker:
         stop_worker(s.worker.name)
     SESSIONS.pop(session_id, None)
+    update_session_status(session_id, "deleted", completed=True)
+    logger.info("Deleted session %s", session_id)
     return {"ok": True}
 
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str) -> dict[str, Any]:
     s = _get_session(session_id)
+    history = get_session_history(session_id)
     return {
         "session_id": s.session_id,
-        "busy": bool(s.task and not s.task.done()),
+        "busy": _session_busy(s),
+        "status": None if not history else history["session"].get("status"),
         "worker": None
         if not s.worker
         else {
             "name": s.worker.name,
+            "host": s.worker.host,
             "vnc": s.worker.vnc,
             "novnc": s.worker.novnc,
             "streamlit": s.worker.streamlit,
@@ -196,15 +297,23 @@ async def get_session(session_id: str) -> dict[str, Any]:
     }
 
 
+@app.get("/sessions/{session_id}/history")
+async def session_history(session_id: str) -> dict[str, Any]:
+    _get_session(session_id)
+    history = get_session_history(session_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return history
+
+
 @app.get("/sessions/{session_id}/ui", response_class=HTMLResponse)
 async def session_ui(session_id: str) -> str:
     s = _get_session(session_id)
     if not s.worker:
         raise HTTPException(status_code=500, detail="Worker not started for session")
 
-    streamlit_url = f"http://127.0.0.1:{s.worker.streamlit}"
     novnc_url = (
-        f"http://127.0.0.1:{s.worker.novnc}/vnc.html"
+        f"http://{PUBLIC_HOST}:{s.worker.novnc}/vnc.html"
         "?resize=scale&autoconnect=1&view_only=1&reconnect=1&reconnect_delay=2000"
     )
 
@@ -215,16 +324,11 @@ async def session_ui(session_id: str) -> str:
   <meta name="permissions-policy" content="fullscreen=*" />
   <style>
     body {{ margin: 0; padding: 0; overflow: hidden; }}
-    .container {{ display: flex; height: 100vh; width: 100vw; }}
-    .left {{ flex: 1; border: none; height: 100vh; }}
-    .right {{ flex: 2; border: none; height: 100vh; }}
+    iframe {{ width: 100vw; height: 100vh; border: none; }}
   </style>
 </head>
 <body>
-  <div class="container">
-    <iframe src="{streamlit_url}" class="left" allow="fullscreen"></iframe>
-    <iframe src="{novnc_url}" class="right" allow="fullscreen"></iframe>
-  </div>
+  <iframe src="{novnc_url}" allow="fullscreen"></iframe>
 </body>
 </html>
 """
@@ -238,7 +342,7 @@ async def sse_events(session_id: str, request: Request):
     if not s.worker:
         raise HTTPException(status_code=500, detail="Worker not started")
 
-    worker_url = f"http://127.0.0.1:{s.worker.http}/events"
+    worker_url = f"http://{s.worker.host}:{s.worker.http}/events"
 
     async def stream():
         # si el cliente manda Last-Event-ID, lo forwardeamos al worker
@@ -269,7 +373,7 @@ async def sse_events(session_id: str, request: Request):
                                 event_name, data, event_id = _parse_sse_block(block)
 
                                 if event_name and data is not None:
-                                    insert_event(session_id, event_name, data)
+                                    _persist_worker_event(session_id, event_name, data)
                                     _touch(s)
 
                                 # opcional: si el worker mandó id, lo guardamos como Last-Event-ID para reconectar
@@ -280,14 +384,16 @@ async def sse_events(session_id: str, request: Request):
 
             except (httpx.RemoteProtocolError, httpx.ReadError) as e:
                 msg = f"worker SSE stream error: {e}"
-                insert_event(session_id, "error", {"message": msg})
+                logger.warning("SSE stream error for session %s: %s", session_id, e)
+                _persist_worker_event(session_id, "error", {"message": msg})
                 yield f"event: error\ndata: {json.dumps({'message': msg})}\n\n"
                 await asyncio.sleep(backoff)
                 backoff = min(max_backoff, backoff * 2)
 
             except Exception as e:
                 msg = str(e)
-                insert_event(session_id, "error", {"message": msg})
+                logger.exception("Unexpected SSE stream error for session %s", session_id)
+                _persist_worker_event(session_id, "error", {"message": msg})
                 yield f"event: error\ndata: {json.dumps({'message': msg})}\n\n"
                 await asyncio.sleep(backoff)
                 backoff = min(max_backoff, backoff * 2)
@@ -311,19 +417,16 @@ async def post_message(session_id: str, body: UserMessageIn) -> dict[str, Any]:
     if not s.worker:
         raise HTTPException(status_code=500, detail="Worker not started")
 
-    if s.task and not s.task.done():
-        raise HTTPException(status_code=409, detail="Session is busy")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
 
-    insert_message(session_id, "user", body.text)
+    async with s.lock:
+        if _session_busy(s):
+            raise HTTPException(status_code=409, detail="Session is busy")
 
-    async def _run_proxy():
-        try:
-            url = f"http://127.0.0.1:{s.worker.http}/messages"
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                r = await client.post(url, json={"text": body.text})
-                r.raise_for_status()
-        finally:
-            _touch(s)
+        insert_message(session_id, "user", text)
+        update_session_status(session_id, "running")
+        s.task = asyncio.create_task(_run_worker_message(session_id, s, text))
 
-    s.task = asyncio.create_task(_run_proxy())
-    return {"ok": True}
+    return {"ok": True, "status": "running"}

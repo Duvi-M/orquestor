@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends docker.io && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN mkdir -p computer_use_demo
+COPY requirements.txt ./requirements.txt
+COPY computer_use_demo/requirements.txt ./computer_use_demo/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY computer_use_demo/ ./computer_use_demo/
+
+CMD ["python", "-m", "uvicorn", "computer_use_demo.api.main:app", "--host", "0.0.0.0", "--port", "9000"]
