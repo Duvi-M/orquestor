@@ -1,6 +1,6 @@
 # Claude Computer Use Session Orchestrator
 
-[![CI](https://github.com/duvi18/computer-use-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/duvi18/computer-use-orchestrator/actions/workflows/ci.yml)
+<!-- Add a GitHub Actions CI badge here after the repository and workflow URL are public/stable. -->
 
 A production-style FastAPI orchestration prototype for running isolated Claude
 Computer Use sessions as backend workloads. It creates one Dockerized desktop
