@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB_PATH = Path("data") / "orchestrator.db"
+from computer_use_demo.api.config import get_settings
 
 
 def get_db_path() -> Path:
-    return Path(os.getenv("COMPUTER_USE_DB_PATH", DEFAULT_DB_PATH)).expanduser()
+    return get_settings().computer_use_db_path
 
 
 def get_conn() -> sqlite3.Connection:

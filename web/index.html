@@ -28,7 +28,10 @@
       <div class="toolbar">
         <div>
           <div class="label">Active Session</div>
-          <div id="active-session">None</div>
+          <div class="active-session-row">
+            <div id="active-session">None</div>
+            <span id="session-status" class="status-badge muted">idle</span>
+          </div>
         </div>
         <div class="toolbar-actions">
           <button id="load-history" disabled>History</button>
@@ -36,7 +39,12 @@
         </div>
       </div>
 
-      <div id="events" class="events"></div>
+      <div id="events" class="events">
+        <div class="empty-state">
+          <strong>No active session</strong>
+          <span>Create a session to stream worker events.</span>
+        </div>
+      </div>
 
       <form id="message-form" class="composer">
         <input id="message" placeholder="Ask the agent to use the computer..." autocomplete="off" disabled />

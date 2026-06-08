@@ -13,7 +13,20 @@ const sendBtn = document.getElementById("send");
 const historyBtn = document.getElementById("load-history");
 const novncLink = document.getElementById("novnc-link");
 const clearSessionsBtn = document.getElementById("clear-sessions");
+const sessionStatusEl = document.getElementById("session-status");
 const STORAGE_KEY = "computer-use-orchestrator.sessions";
+
+const EVENT_LABELS = {
+  assistant_block: "ASSISTANT_BLOCK",
+  user_message: "USER_MESSAGE",
+  tool_use_start: "TOOL_USE_START",
+  tool_result: "TOOL_RESULT",
+  screenshot: "SCREENSHOT",
+  done: "DONE",
+  ready: "READY",
+  error: "ERROR",
+  ping: "PING",
+};
 
 function shortId(id) {
   return id ? id.slice(0, 8) : "none";
@@ -28,6 +41,18 @@ function eventClass(name) {
   return "tool";
 }
 
+function eventLabel(name) {
+  return EVENT_LABELS[name] || name.toUpperCase();
+}
+
+function statusClass(status) {
+  if (status === "done" || status === "completed" || status === "ready") return "ready";
+  if (status === "running") return "running";
+  if (status === "error") return "error";
+  if (status === "deleted") return "muted";
+  return "muted";
+}
+
 function describeEvent(name, data) {
   if (name === "assistant_block") return data.text || "";
   if (name === "user_message") return data.text || "";
@@ -40,12 +65,30 @@ function describeEvent(name, data) {
   return JSON.stringify(data);
 }
 
+function renderEmptyState(title, body) {
+  eventsEl.innerHTML = "";
+  const empty = document.createElement("div");
+  empty.className = "empty-state";
+
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+
+  const text = document.createElement("span");
+  text.textContent = body;
+
+  empty.append(heading, text);
+  eventsEl.appendChild(empty);
+}
+
 function renderEventRow(name, data, fromHistory = false) {
+  const empty = eventsEl.querySelector(".empty-state");
+  if (empty) empty.remove();
+
   const row = document.createElement("div");
   row.className = `event ${eventClass(name)}`;
 
   const label = document.createElement("strong");
-  label.textContent = fromHistory ? `${name} · history` : name;
+  label.textContent = fromHistory ? `${eventLabel(name)} · HISTORY` : eventLabel(name);
 
   const body = document.createElement("span");
   body.textContent = describeEvent(name, data);
@@ -57,10 +100,24 @@ function renderEventRow(name, data, fromHistory = false) {
 
 function renderSessions() {
   sessionsEl.innerHTML = "";
+  if (sessions.size === 0) {
+    const empty = document.createElement("div");
+    empty.className = "sidebar-empty";
+    empty.textContent = "No sessions yet";
+    sessionsEl.appendChild(empty);
+    return;
+  }
   for (const session of sessions.values()) {
     const button = document.createElement("button");
+    const status = session.status || "created";
     button.className = `session ${session.id === activeSessionId ? "active" : ""}`;
-    button.textContent = `${shortId(session.id)} · ${session.status || "created"}`;
+    button.innerHTML = "";
+    const title = document.createElement("span");
+    title.textContent = shortId(session.id);
+    const badge = document.createElement("span");
+    badge.className = `status-badge ${statusClass(status)}`;
+    badge.textContent = status;
+    button.append(title, badge);
     button.onclick = () => setActiveSession(session.id);
     sessionsEl.appendChild(button);
   }
@@ -145,6 +202,9 @@ function setActiveSession(sessionId) {
   const session = sessions.get(sessionId);
 
   activeSessionEl.textContent = session ? session.id : "None";
+  const status = session ? session.status || "created" : "idle";
+  sessionStatusEl.textContent = status;
+  sessionStatusEl.className = `status-badge ${statusClass(status)}`;
   input.disabled = !session;
   sendBtn.disabled = !session;
   historyBtn.disabled = !session;
@@ -158,11 +218,17 @@ function setActiveSession(sessionId) {
     novncLink.classList.add("disabled");
   }
 
-  eventsEl.innerHTML = "";
   if (session) {
-    for (const event of session.events) {
-      renderEventRow(event.name, event.data);
+    eventsEl.innerHTML = "";
+    if (session.events.length === 0) {
+      renderEmptyState("Waiting for events", "Send a task or open history for this session.");
+    } else {
+      for (const event of session.events) {
+        renderEventRow(event.name, event.data);
+      }
     }
+  } else {
+    renderEmptyState("No active session", "Create a session to stream worker events.");
   }
   renderSessions();
 }
@@ -220,6 +286,7 @@ function connectEvents(session) {
 
 async function createSession() {
   createBtn.disabled = true;
+  createBtn.textContent = "Creating...";
   try {
     const response = await fetch(`${API_BASE}/sessions`, { method: "POST" });
     const data = await response.json();
@@ -241,6 +308,7 @@ async function createSession() {
     alert(error.message);
   } finally {
     createBtn.disabled = false;
+    createBtn.textContent = "New Session";
   }
 }
 
@@ -252,6 +320,7 @@ async function sendMessage(event) {
 
   input.value = "";
   sendBtn.disabled = true;
+  sendBtn.textContent = "Sending...";
 
   try {
     const exists = await ensureSessionExists(session);
@@ -271,6 +340,7 @@ async function sendMessage(event) {
     addEvent(session.id, "error", { message: error.message });
   } finally {
     sendBtn.disabled = false;
+    sendBtn.textContent = "Send";
   }
 }
 
@@ -289,12 +359,16 @@ async function loadHistory() {
     return;
   }
 
-  eventsEl.innerHTML = "";
   session.events = [];
   session.status = data.session.status;
   persistSessions();
-  for (const event of data.events) {
-    addEvent(session.id, event.event, event.data, true);
+  eventsEl.innerHTML = "";
+  if (data.events.length === 0) {
+    renderEmptyState("No history yet", "Events will appear here after a task runs.");
+  } else {
+    for (const event of data.events) {
+      addEvent(session.id, event.event, event.data, true);
+    }
   }
   renderSessions();
 }

@@ -1,170 +1,149 @@
 # Claude Computer Use Session Orchestrator
 
-A session-oriented FastAPI backend for running isolated Claude Computer Use
-workers with real-time event streaming, noVNC desktop access, Docker-based
-worker lifecycle management, and persistent session history.
+[![CI](https://github.com/duvi18/computer-use-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/duvi18/computer-use-orchestrator/actions/workflows/ci.yml)
 
-This project explores how Operator-style computer-use agents can be managed as
-backend workloads instead of as a single-user demo. Each session gets its own
-desktop worker, can be observed through noVNC, streams progress through SSE, and
-stores messages/events for later debugging.
+A production-style FastAPI orchestration prototype for running isolated Claude
+Computer Use sessions as backend workloads. It creates one Dockerized desktop
+worker per session, streams real-time agent events through SSE, exposes the
+worker desktop through noVNC, and persists session history in SQLite for
+debugging and demos.
 
-> Prototype status: production-style architecture and tests, but not hardened
-> for untrusted or public deployments.
-
-## Highlights
-
-- Isolated per-session worker containers managed by a FastAPI orchestrator
-- Real-time Server-Sent Events for agent progress, screenshots, tool calls, and
-  completion/error states
-- Browser-accessible noVNC desktop for observing each running worker
-- SQLite-backed session, message, status, error, and event persistence
-- Dependency-free HTML/CSS/JavaScript frontend for local demos
-- Focused backend tests with mocked worker behavior
-- Reuses Anthropic Computer Use loop/tools instead of reimplementing the agent
-  runtime
-
-## Why This Exists
-
-Computer-use agents become more useful when they can be started, isolated,
-observed, stopped, and debugged like real backend workloads. The original demo
-stack is valuable for experimentation, but it is centered around one local
-session. This repository wraps that idea with a small orchestration layer:
-
-- create and delete sessions through an API
-- allocate a dedicated Docker worker for each session
-- forward user tasks to the worker API
-- stream live worker events back to the frontend
-- persist history so completed sessions can be inspected later
-- expose each worker desktop through noVNC
-
-The goal is not to claim this is a finished platform. The goal is to show the
-backend shape needed to move computer-use agents toward multi-session,
-observable workflows.
+This is a personal AI infrastructure project focused on backend engineering
+quality: lifecycle management, reliable cleanup, config validation, local
+security boundaries, observability, and testable failure paths. It is not a
+hardened SaaS platform.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    U["Browser UI<br/>HTML/CSS/JS"] -->|"REST + SSE"| O["FastAPI Orchestrator"]
+    O -->|"docker run / rm"| D["Docker Engine"]
+    D --> W1["Worker Container<br/>Session A"]
+    D --> W2["Worker Container<br/>Session B"]
+    W1 --> C1["Claude Computer Use<br/>loop + tools"]
+    W2 --> C2["Claude Computer Use<br/>loop + tools"]
+    W1 --> V1["Virtual Desktop<br/>VNC / noVNC"]
+    W2 --> V2["Virtual Desktop<br/>VNC / noVNC"]
+    O --> DB[("SQLite<br/>sessions / messages / events")]
+```
+
+Text fallback:
+
 ```text
 HTML/JS frontend
-    |
-    | REST + SSE
-    v
-FastAPI orchestrator
-    |
-    | Docker worker lifecycle
-    v
-Per-session worker container
-    |
-    | Anthropic Computer Use loop/tools
-    v
-Virtual desktop + noVNC + worker events
-
-SQLite stores sessions, messages, statuses, errors, and event history.
+  -> FastAPI orchestrator
+  -> one Docker worker per session
+  -> Claude Computer Use loop/tools
+  -> SSE events + noVNC desktop
+  -> SQLite session history
 ```
 
-The primary interface is the dependency-free frontend under `web/`. The
-Streamlit code is retained only as legacy/debug reference code and is not part
-of the main flow.
+## Engineering Highlights
 
-## Tech Stack
+- Session-oriented FastAPI API for create/get/delete/message/history flows.
+- One isolated desktop worker container per session.
+- Real-time Server-Sent Events proxying and persistence.
+- noVNC access to observe the virtual desktop while the agent works.
+- SQLite-backed session, message, status, error, and event history.
+- Config module with validation for tokens, worker image, limits, timeouts, and CORS.
+- Worker CPU, memory, and PID limits for safer local demos.
+- Label-scoped worker cleanup to avoid deleting unrelated containers.
+- Optional bearer token protection for session-scoped orchestrator endpoints.
+- Optional VNC password support while preserving the passwordless local demo.
+- Structured local-dev logs for startup, worker lifecycle, SSE, task duration, and failures.
+- Focused tests with mocked worker and Anthropic behavior.
 
-- Python
-- FastAPI
-- Docker
-- SQLite
-- Server-Sent Events
-- VNC / noVNC
-- Anthropic Claude Computer Use stack
-- HTML, CSS, JavaScript
-- pytest
+## Tradeoffs
 
-## Repository Structure
+- SQLite is intentionally used for a local/demo persistence layer. PostgreSQL
+  would be the natural next step for multi-user or long-running deployments.
+- Docker socket access keeps the prototype simple, but it is a serious trust
+  boundary. This should stay local or be replaced by a narrower worker launcher.
+- The frontend is dependency-free HTML/CSS/JS to keep the backend architecture
+  easy to inspect. It is a demo console, not a full product UI.
+- Worker reattachment after orchestrator restart is documented as a future
+  improvement. Current in-memory session state is paired with persisted history.
+- API token auth is deliberately simple. There are no accounts, OAuth, roles, or
+  multi-tenant ownership checks.
+
+## Security Model
+
+Default mode is trusted local development:
+
+- The orchestrator and frontend are intended to run on localhost.
+- Worker ports are bound to `127.0.0.1`.
+- `.env`, databases, logs, caches, and local artifacts are ignored by git.
+- `/healthz`, `/readyz`, and `/docs` remain public for local diagnostics.
+- If `ORCHESTRATOR_API_TOKEN` is set, session-scoped endpoints require:
+
+```http
+Authorization: Bearer your_token
+```
+
+Protected endpoints include session create/get/delete, messages, history, UI,
+and SSE streams. The static frontend does not inject tokens; keep the token
+unset for the simplest browser demo or use an API client for protected mode.
+
+See [SECURITY.md](SECURITY.md) for the Docker socket risk, noVNC/VNC assumptions,
+and future hardening options.
+
+## Expected Event Examples
+
+The worker emits SSE events that the orchestrator proxies and stores.
+
+ASSISTANT_BLOCK:
 
 ```text
-.
-├── computer_use_demo/
-│   ├── api/
-│   │   ├── main.py              # FastAPI orchestrator
-│   │   ├── db.py                # SQLite persistence helpers
-│   │   └── worker_manager.py    # Docker worker lifecycle
-│   ├── worker_api.py            # Primary worker FastAPI API
-│   ├── worker_api_service/      # Lightweight echo/SSE stub for experiments
-│   ├── loop.py                  # Anthropic Computer Use sampling loop
-│   ├── streamlit.py             # Legacy/debug UI, not primary flow
-│   └── tools/                   # Computer, bash, edit, and run tools
-├── demo/
-│   └── concurrency_demo.sh      # Manual multi-session demo helper
-├── image/                       # Worker desktop/noVNC startup scripts
-├── tests/                       # Backend and worker tests
-├── web/                         # Primary HTML/JS frontend
-├── Dockerfile                   # Worker image
-├── Dockerfile.orchestrator      # Orchestrator image
-├── docker-compose.yml
-├── requirements.txt
-├── dev-requirements.txt
-├── ruff.toml
-├── pyproject.toml
-└── .env.example
+event: assistant_block
+data: {"type":"text","text":"I will open the browser and search for the weather."}
 ```
 
-## Setup
+TOOL_USE_START:
 
-Create a Python environment and install dependencies:
+```text
+event: tool_use_start
+data: {"id":"toolu_123","name":"computer","input":{"action":"screenshot"}}
+```
+
+TOOL_RESULT:
+
+```text
+event: tool_result
+data: {"tool_use_id":"toolu_123","is_error":false,"output":"Opened Firefox."}
+```
+
+SCREENSHOT:
+
+```text
+event: screenshot
+data: {"tool_use_id":"toolu_123","image_base64":"..."}
+```
+
+DONE:
+
+```text
+event: done
+data: {"ok":true}
+```
+
+## Quick Start
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-
 pip install -r requirements.txt
 pip install -r dev-requirements.txt
-```
 
-Export the required environment variables:
-
-```bash
 export ANTHROPIC_API_KEY="your_anthropic_api_key"
-export COMPUTER_USE_DB_PATH="./data/orchestrator.db"
-export PUBLIC_HOST="127.0.0.1"
-export WORKER_CONNECT_HOST="127.0.0.1"
-export MODEL="claude-sonnet-4-5-20250929"
-export TOOL_VERSION="computer_use_20250124"
-export MAX_TOKENS="4096"
-export ENABLE_STREAMLIT="false"
+make build-worker
+make run-api
 ```
 
-Build the worker image:
+In another terminal:
 
 ```bash
-docker build -t computer-use-demo:local .
-```
-
-Start the orchestrator:
-
-```bash
-python -m uvicorn computer_use_demo.api.main:app --host 127.0.0.1 --port 9000
-```
-
-Start the frontend in another terminal:
-
-```bash
-python -m http.server 5173 -d web
-```
-
-Open the app:
-
-```text
-http://127.0.0.1:5173
-```
-
-## Docker Compose
-
-The compose setup runs the orchestrator and static frontend. Worker containers
-are still created dynamically by the orchestrator, one per session.
-
-```bash
-export ANTHROPIC_API_KEY="your_anthropic_api_key"
-docker build -t computer-use-demo:local .
-docker compose up --build
+make run-web
 ```
 
 Open:
@@ -173,40 +152,32 @@ Open:
 http://127.0.0.1:5173
 ```
 
-The orchestrator container mounts the Docker socket so it can create worker
-containers. This is practical for local development, but it should be hardened
-before use in untrusted environments.
+## Configuration Reference
 
-## Usage
+Runtime configuration is centralized in `computer_use_demo/api/config.py`.
 
-1. Open the frontend.
-2. Click `New Session`.
-3. Select the session in the sidebar.
-4. Click `Open noVNC` to observe the worker desktop.
-5. Send a task such as:
-
-```text
-Open Firefox and search for the current weather in Tokyo.
-```
-
-6. Watch real-time events in the frontend:
-
-```text
-user_message
-assistant_block
-tool_use_start
-tool_result
-screenshot
-done
-error
-```
-
-7. Refresh the browser and click `History` to reload persisted events.
-8. Create a second session to verify independent worker containers.
-
-The frontend stores recent session IDs in local browser storage. Use
-`Clear local` if the backend has been restarted and old sessions no longer
-exist.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | empty | Required to run real Claude Computer Use tasks. |
+| `ORCHESTRATOR_API_TOKEN` | empty | Optional bearer token for session-scoped API endpoints. |
+| `COMPUTER_USE_DB_PATH` | `data/orchestrator.db` | SQLite database path. |
+| `PUBLIC_HOST` | `127.0.0.1` | Host used when returning frontend/noVNC URLs. |
+| `WORKER_CONNECT_HOST` | `127.0.0.1` | Host the orchestrator uses to call worker HTTP APIs. |
+| `WORKER_IMAGE` | `computer-use-demo:local` | Docker image used for workers. |
+| `MODEL` | `claude-sonnet-4-5-20250929` | Claude model passed to workers. |
+| `TOOL_VERSION` | `computer_use_20250124` | Anthropic Computer Use tool version. |
+| `MAX_TOKENS` | `4096` | Maximum Claude response tokens. |
+| `ENABLE_STREAMLIT` | `false` | Enables the legacy/debug Streamlit UI inside workers. |
+| `VNC_PASSWORD` | empty | Optional VNC password for worker desktop access. |
+| `LOG_LEVEL` | `INFO` | Python logging level. |
+| `CORS_ALLOWED_ORIGINS` | localhost frontend origins | Comma-separated CORS allowlist. |
+| `CLEANUP_ORPHAN_WORKERS_ON_STARTUP` | `false` | Remove project-labeled workers at startup. |
+| `SESSION_TTL_SECONDS` | `300` | Idle session cleanup threshold. |
+| `WORKER_READY_TIMEOUT_SECONDS` | `25.0` | Worker readiness timeout. |
+| `SSE_RETRY_LIMIT` | `3` | Worker SSE reconnect attempts before surfacing an error. |
+| `WORKER_CPU_LIMIT` | `1.0` | `docker run --cpus` value for each worker. |
+| `WORKER_MEMORY_LIMIT` | `2g` | `docker run --memory` value for each worker. |
+| `WORKER_PIDS_LIMIT` | `512` | `docker run --pids-limit` value for each worker. |
 
 ## API Overview
 
@@ -218,77 +189,75 @@ DELETE /sessions/{id}
 POST   /sessions/{id}/messages
 GET    /sessions/{id}/events
 GET    /sessions/{id}/history
+
+GET    /healthz
+GET    /readyz
 ```
 
-`POST /sessions` returns:
+`/healthz`, `/readyz`, and `/docs` are public local diagnostics. Session-scoped
+endpoints are protected when `ORCHESTRATOR_API_TOKEN` is configured.
 
-- `session_id`
-- `novnc_url`
-- `ui_url`
-- `worker_http`
-
-`GET /sessions/{id}/events` streams worker events through SSE.
-
-`GET /sessions/{id}/history` returns persisted session metadata, messages, and
-events from SQLite.
-
-## Testing
-
-Run the focused backend suite:
+## Development Commands
 
 ```bash
-python -B -m pytest -q tests/test_api_app.py tests/test_db.py tests/test_orchestrator_sessions.py tests/test_worker_api.py
+make install        # Create .venv and install runtime/dev dependencies
+make test           # Run focused unit tests
+make smoke-local    # Check API health/readiness and frontend HTML
+make build-worker   # Build the per-session worker image
+make run-api        # Start the FastAPI orchestrator on 127.0.0.1:9000
+make run-web        # Serve the static frontend on 127.0.0.1:5173
+make clean-workers  # Remove Docker workers labeled cambioml=orchestrator
+make clean-local    # Remove local test/lint/cache artifacts
 ```
 
-Run all tests:
+## 5-Minute Demo Script
 
-```bash
-pytest
-```
+1. Show the architecture diagram and explain one worker container per session.
+2. Run `make test` to show the focused test suite.
+3. Start Docker, then run `make build-worker`.
+4. Start the API with `make run-api` and the frontend with `make run-web`.
+5. Open `http://127.0.0.1:5173`.
+6. Create Session A and open noVNC.
+7. Send: `Open Firefox and search for the current weather in Tokyo.`
+8. Point out `assistant_block`, `tool_use_start`, `tool_result`, `screenshot`,
+   and `done` events in the timeline.
+9. Create Session B and send a different task to show isolation.
+10. Refresh the frontend and load `History`.
+11. Delete a session and show worker cleanup logs.
 
-The worker tests use mocks and do not call the real Anthropic API.
+## Screenshots And GIFs
 
-## Demo Flow
+Recommended portfolio assets:
 
-A concise five-minute portfolio demo:
+- `docs/assets/frontend-session-timeline.png`
+- `docs/assets/novnc-worker-desktop.png`
+- `docs/assets/two-session-demo.gif`
 
-1. Show the architecture diagram.
-2. Start Docker, the orchestrator, and the frontend.
-3. Create Session A.
-4. Open noVNC for Session A.
-5. Send a browser/search task.
-6. Show live SSE events and desktop activity.
-7. Create Session B and send a different task.
-8. Show both sessions have independent containers.
-9. Refresh the frontend and load `History`.
-10. Show the focused tests passing.
+Do not include API keys, `.env` contents, real customer data, private challenge
+text, reviewer names, or browser tabs with personal information.
 
 ## Known Limitations
 
 - SQLite is used for local/demo persistence.
-- Active worker reattachment after orchestrator restart is not fully
-  implemented.
-- Docker socket mounting is convenient locally but requires hardening in
-  production-like deployments.
-- Real Claude execution requires a valid Anthropic API key.
-- The frontend is intentionally basic and optimized for demonstrating APIs.
-- Authentication and authorization are not included.
+- Active worker reattachment after orchestrator restart is not fully implemented.
+- Docker socket access is powerful and should stay in trusted local environments.
+- VNC/noVNC is local-first and not intended for public exposure.
+- The frontend is a dependency-free demo console, not a polished SaaS UI.
+- API token auth is intentionally simple and not a user/account system.
 
-## Future Improvements
+## Future Roadmap
 
-- PostgreSQL persistence
-- Worker reattachment and recovery after orchestrator restart
-- Authentication and per-user authorization
-- Queue-based scheduling for tasks and workers
-- Kubernetes deployment model
-- Richer frontend with screenshots and task timelines
-- WebSocket streaming alternative
-- Structured observability with metrics and tracing
+- Reattach or reconcile active workers after orchestrator restart.
+- Add migrations and PostgreSQL option for longer-running deployments.
+- Add a worker-launch sidecar or Docker API proxy to reduce socket exposure.
+- Add richer event timeline with screenshot thumbnails and task duration.
+- Add WebSocket streaming alternative for clients that prefer bidirectional flows.
+- Add structured metrics/tracing behind an optional local flag.
+- Add packaging for reproducible demo releases.
 
-## Security Notes
+## Additional Docs
 
-- Never commit `.env` or real API keys.
-- Do not expose the Docker socket in untrusted environments.
-- API keys are passed through environment variables to worker containers.
-- noVNC ports are bound locally by default; review network exposure before
-  deploying remotely.
+- [Architecture](docs/ARCHITECTURE.md)
+- [Operations](docs/OPERATIONS.md)
+- [Demo Guide](docs/DEMO.md)
+- [Security Notes](SECURITY.md)

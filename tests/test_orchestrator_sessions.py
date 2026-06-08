@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 
 import pytest
 from fastapi import HTTPException
@@ -35,7 +36,7 @@ async def test_session_creation_uses_isolated_workers(monkeypatch):
             http=8080 + counter,
         )
 
-    async def fake_wait_worker_ready(_host, _port):
+    async def fake_wait_worker_ready(_worker):
         return None
 
     monkeypatch.setattr(main, "start_worker", fake_start_worker)
@@ -92,6 +93,20 @@ async def test_worker_event_persistence_used_by_sse_does_not_raise_name_error():
     assert history["events"][0]["data"] == {"ok": True}
 
 
+async def test_session_history_endpoint_still_returns_messages_and_events():
+    session_id = "session-history"
+    main.insert_session(session_id)
+    main.SESSIONS[session_id] = main.SessionState(session_id=session_id)
+    main.insert_message(session_id, "user", "hello")
+    main._persist_worker_event(session_id, "done", {"ok": True})
+
+    history = await main.session_history(session_id)
+
+    assert history["session"]["id"] == session_id
+    assert history["messages"][0]["role"] == "user"
+    assert history["events"][0]["event"] == "done"
+
+
 async def test_worker_status_timeout_does_not_mark_running_session_failed(monkeypatch):
     session_id = "session-timeout"
     session = main.SessionState(
@@ -142,3 +157,176 @@ async def test_worker_status_timeout_does_not_mark_running_session_failed(monkey
     assert history is not None
     assert history["session"]["status"] == "completed"
     assert history["session"]["error"] is None
+
+
+async def test_worker_forward_failure_marks_session_error(monkeypatch):
+    session_id = "session-forward-failure"
+    session = main.SessionState(
+        session_id=session_id,
+        worker=WorkerInfo(
+            name="worker-forward-failure",
+            host="127.0.0.1",
+            vnc=5900,
+            novnc=6080,
+            streamlit=8501,
+            http=8080,
+        ),
+    )
+    main.SESSIONS[session_id] = session
+    main.insert_session(session_id)
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            raise main.httpx.ConnectError("worker unavailable")
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+
+    await main._run_worker_message(session_id, session, "hello")
+
+    history = main.get_session_history(session_id)
+    assert history is not None
+    assert history["session"]["status"] == "error"
+    assert "worker unavailable" in history["session"]["error"]
+
+
+async def test_worker_startup_readiness_failure_is_persisted(monkeypatch):
+    stopped = []
+
+    def fake_start_worker(*, session_id, api_key):
+        return WorkerInfo(
+            name=f"worker-{session_id}",
+            host="127.0.0.1",
+            vnc=5900,
+            novnc=6080,
+            streamlit=8501,
+            http=8080,
+        )
+
+    async def fake_wait_worker_ready(worker):
+        raise main.WorkerReadyError(f"not ready: {worker.name}")
+
+    def fake_stop_worker(name):
+        stopped.append(name)
+
+    monkeypatch.setattr(main, "start_worker", fake_start_worker)
+    monkeypatch.setattr(main, "_wait_worker_ready", fake_wait_worker_ready)
+    monkeypatch.setattr(main, "stop_worker", fake_stop_worker)
+
+    with pytest.raises(HTTPException) as exc:
+        await main.create_session()
+
+    assert exc.value.status_code == 500
+    assert len(stopped) == 1
+
+    session_id = stopped[0].removeprefix("worker-")
+    sessions = main.get_session_history(session_id)
+    assert sessions is not None
+    assert sessions["session"]["status"] == "error"
+    assert sessions["events"][0]["event"] == "error"
+    assert sessions["events"][0]["data"]["stage"] == "worker_readiness"
+
+
+async def test_delete_session_stops_worker_and_persists_deleted_event(monkeypatch):
+    stopped = []
+    session_id = "session-delete"
+    task_started = asyncio.Event()
+    release_task = asyncio.Event()
+
+    async def running_task():
+        task_started.set()
+        await release_task.wait()
+
+    main.insert_session(session_id)
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=WorkerInfo(
+            name="worker-delete",
+            host="127.0.0.1",
+            vnc=5900,
+            novnc=6080,
+            streamlit=8501,
+            http=8080,
+        ),
+    )
+    task = asyncio.create_task(running_task())
+    main.SESSIONS[session_id].task = task
+    await task_started.wait()
+
+    monkeypatch.setattr(main, "stop_worker", lambda name: stopped.append(name))
+
+    result = await main.delete_session(session_id)
+
+    assert result == {"ok": True}
+    assert stopped == ["worker-delete"]
+    assert session_id not in main.SESSIONS
+
+    history = main.get_session_history(session_id)
+    assert history is not None
+    assert history["session"]["status"] == "deleted"
+    assert history["events"][0]["event"] == "deleted"
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def test_sse_reconnect_limit_persists_one_synthetic_error(monkeypatch):
+    session_id = "session-sse-limit"
+    main.insert_session(session_id)
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=WorkerInfo(
+            name="worker-sse",
+            host="127.0.0.1",
+            vnc=5900,
+            novnc=6080,
+            streamlit=8501,
+            http=8080,
+        ),
+    )
+    monkeypatch.setattr(main, "SSE_RETRY_LIMIT", 1)
+    monkeypatch.setattr(main, "SSE_RETRY_INITIAL_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(main, "SSE_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    class FakeStream:
+        async def __aenter__(self):
+            raise main.httpx.ReadError("boom")
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def stream(self, *_args, **_kwargs):
+            return FakeStream()
+
+    class FakeRequest:
+        headers = {}
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeClient)
+
+    response = await main.sse_events(session_id, FakeRequest())
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert len(chunks) == 1
+    assert "event: error" in chunks[0]
+
+    history = main.get_session_history(session_id)
+    assert history is not None
+    error_events = [event for event in history["events"] if event["event"] == "error"]
+    assert len(error_events) == 1

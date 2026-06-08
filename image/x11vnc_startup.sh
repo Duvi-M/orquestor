@@ -1,12 +1,17 @@
 #!/bin/bash
 echo "starting vnc"
 
+auth_args=(-nopw)
+if [ -n "${VNC_PASSWORD:-}" ]; then
+    auth_args=(-passwd "$VNC_PASSWORD")
+fi
+
 (x11vnc -display $DISPLAY \
     -forever \
     -shared \
     -wait 50 \
     -rfbport 5900 \
-    -nopw \
+    "${auth_args[@]}" \
     2>/tmp/x11vnc_stderr.log) &
 
 x11vnc_pid=$!

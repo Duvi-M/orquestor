@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
-import os
 import socket
 import subprocess
 from dataclasses import dataclass
 
+from computer_use_demo.api.config import get_settings
+
 logger = logging.getLogger(__name__)
+PROJECT_LABEL = "cambioml=orchestrator"
 
 
 @dataclass
@@ -35,7 +37,19 @@ def _redact_secret(value: str) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
-def start_worker(*, session_id: str, api_key: str, image: str = "computer-use-demo:local") -> WorkerInfo:
+def _redact_cmd(cmd: list[str], secret_values: list[str]) -> list[str]:
+    redacted = cmd[:]
+    for secret_value in secret_values:
+        if not secret_value:
+            continue
+        redacted = [
+            part.replace(secret_value, _redact_secret(secret_value))
+            for part in redacted
+        ]
+    return redacted
+
+
+def start_worker(*, session_id: str, api_key: str, image: str | None = None) -> WorkerInfo:
     """
     Starts a dedicated docker container per session, exposing:
       - 5900 VNC
@@ -49,34 +63,47 @@ def start_worker(*, session_id: str, api_key: str, image: str = "computer-use-de
     streamlit = _get_free_port()
     novnc = _get_free_port()
     http = _get_free_port()
-    connect_host = os.getenv("WORKER_CONNECT_HOST", "127.0.0.1")
+    settings = get_settings()
+    worker_image = image or settings.worker_image
 
     cmd = [
         "docker", "run", "-d",
         "--name", name,
-        "--label", "cambioml=orchestrator",
+        "--label", PROJECT_LABEL,
         "--label", f"session_id={session_id}",
+        "--cpus", str(settings.worker_cpu_limit),
+        "--memory", settings.worker_memory_limit,
+        "--pids-limit", str(settings.worker_pids_limit),
         "-e", f"ANTHROPIC_API_KEY={api_key}",
-        "-e", f"MODEL={os.getenv('MODEL', 'claude-sonnet-4-5-20250929')}",
-        "-e", f"TOOL_VERSION={os.getenv('TOOL_VERSION', 'computer_use_20250124')}",
-        "-e", f"MAX_TOKENS={os.getenv('MAX_TOKENS', '4096')}",
-        "-e", f"ENABLE_STREAMLIT={os.getenv('ENABLE_STREAMLIT', 'false')}",
+        "-e", f"MODEL={settings.model}",
+        "-e", f"TOOL_VERSION={settings.tool_version}",
+        "-e", f"MAX_TOKENS={settings.max_tokens}",
+        "-e", f"ENABLE_STREAMLIT={settings.enable_streamlit}",
+        "-e", f"VNC_PASSWORD={settings.vnc_password}",
         "-p", f"127.0.0.1:{vnc}:5900",
         "-p", f"127.0.0.1:{streamlit}:8501",
         "-p", f"127.0.0.1:{novnc}:6080",
         "-p", f"127.0.0.1:{http}:8080",
-        image,
+        worker_image,
     ]
 
     # IMPORTANT: do NOT use --rm while debugging; if the container exits instantly, you lose logs.
     # If docker run fails, capture_output=True lets you see the exact reason.
-    logger.info("Starting worker container %s", name)
+    logger.info(
+        "worker_container_create_start worker=%s image=%s vnc_port=%s novnc_port=%s streamlit_port=%s http_port=%s cpu_limit=%s memory_limit=%s pids_limit=%s",
+        name,
+        worker_image,
+        vnc,
+        novnc,
+        streamlit,
+        http,
+        settings.worker_cpu_limit,
+        settings.worker_memory_limit,
+        settings.worker_pids_limit,
+    )
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
-        safe_cmd = [
-            part.replace(api_key, _redact_secret(api_key))
-            for part in cmd
-        ]
+        safe_cmd = _redact_cmd(cmd, [api_key, settings.vnc_password])
         raise RuntimeError(
             "Failed to start worker container.\n"
             f"cmd: {' '.join(safe_cmd)}\n"
@@ -84,9 +111,18 @@ def start_worker(*, session_id: str, api_key: str, image: str = "computer-use-de
             f"stderr:\n{proc.stderr}\n"
         )
 
+    logger.info(
+        "worker_container_created worker=%s host=%s vnc_port=%s novnc_port=%s streamlit_port=%s http_port=%s",
+        name,
+        settings.worker_connect_host,
+        vnc,
+        novnc,
+        streamlit,
+        http,
+    )
     return WorkerInfo(
         name=name,
-        host=connect_host,
+        host=settings.worker_connect_host,
         vnc=vnc,
         novnc=novnc,
         streamlit=streamlit,
@@ -96,5 +132,27 @@ def start_worker(*, session_id: str, api_key: str, image: str = "computer-use-de
 
 def stop_worker(name: str) -> None:
     # Safe stop (works even if container already exited)
-    logger.info("Stopping worker container %s", name)
+    logger.info("worker_container_stop worker=%s", name)
     subprocess.run(["docker", "rm", "-f", name], check=False)
+
+
+def list_project_worker_names() -> list[str]:
+    proc = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", f"label={PROJECT_LABEL}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        logger.warning("Failed to list project worker containers: %s", proc.stderr.strip())
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def cleanup_project_workers() -> int:
+    names = list_project_worker_names()
+    for name in names:
+        stop_worker(name)
+    if names:
+        logger.info("Cleaned up %s project worker container(s)", len(names))
+    return len(names)

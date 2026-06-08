@@ -3,15 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
+import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, AsyncGenerator
 
+from anthropic.types.beta import BetaMessageParam, BetaTextBlockParam
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from anthropic.types.beta import BetaMessageParam, BetaTextBlockParam
+from computer_use_demo.api.config import ConfigError, get_settings
 from computer_use_demo.loop import APIProvider, sampling_loop
 from computer_use_demo.tools import TOOL_GROUPS_BY_VERSION
 
@@ -28,8 +29,8 @@ class MessageIn(BaseModel):
 
 @dataclass
 class WorkerState:
-    queue: "asyncio.Queue[dict]" = field(default_factory=asyncio.Queue)
-    task: Optional[asyncio.Task] = None
+    queue: asyncio.Queue[dict] = field(default_factory=asyncio.Queue)
+    task: asyncio.Task | None = None
     messages: list[BetaMessageParam] = field(default_factory=list)
     status: str = "idle"
     error: str | None = None
@@ -193,12 +194,18 @@ async def post_message(body: MessageIn):
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    try:
+        settings = get_settings()
+    except ConfigError as exc:
+        await _emit("error", {"message": str(exc)})
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    api_key = settings.anthropic_api_key
     if not api_key:
         await _emit("error", {"message": "ANTHROPIC_API_KEY not set in worker"})
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set in worker")
 
-    tool_version = os.getenv("TOOL_VERSION", "computer_use_20250124")
+    tool_version = settings.tool_version
     if tool_version not in TOOL_GROUPS_BY_VERSION:
         message = f"Unsupported TOOL_VERSION: {tool_version}"
         await _emit("error", {"message": message})
@@ -210,9 +217,10 @@ async def post_message(body: MessageIn):
 
     STATE.status = "running"
     STATE.error = None
-    logger.info("Worker received message: %s", text)
+    logger.info("worker_message_received text_length=%s", len(text))
 
     async def _run():
+        started_at = time.monotonic()
         try:
             await _emit("user_message", {"text": text})
 
@@ -236,14 +244,15 @@ async def post_message(body: MessageIn):
                     exc_info=(type(exception), exception, exception.__traceback__),
                 )
 
-            model = os.getenv("MODEL", "claude-sonnet-4-5-20250929")
-            max_tokens = int(os.getenv("MAX_TOKENS", "4096"))
+            model = settings.model
+            max_tokens = settings.max_tokens
 
             logger.info(
-                "Worker starting Claude computer-use loop model=%s tool_version=%s max_tokens=%s",
+                "worker_task_started model=%s tool_version=%s max_tokens=%s message_count=%s",
                 model,
                 tool_version,
                 max_tokens,
+                len(STATE.messages),
             )
 
             STATE.messages = await sampling_loop(
@@ -266,12 +275,22 @@ async def post_message(body: MessageIn):
                 raise RuntimeError(api_errors[-1])
 
             STATE.status = "done"
-            logger.info("Worker completed Claude computer-use loop")
+            logger.info(
+                "worker_task_completed duration_seconds=%.3f event_count=%s message_count=%s",
+                time.monotonic() - started_at,
+                len(STATE.event_log),
+                len(STATE.messages),
+            )
             await _emit("done", {"ok": True})
         except Exception as e:
             STATE.status = "error"
             STATE.error = str(e)
-            logger.exception("Worker task failed")
+            logger.exception(
+                "worker_task_failed duration_seconds=%.3f event_count=%s error=%s",
+                time.monotonic() - started_at,
+                len(STATE.event_log),
+                e,
+            )
             await _emit("error", {"message": str(e)})
 
     STATE.task = asyncio.create_task(_run())

@@ -5,7 +5,7 @@ from httpx import ASGITransport, AsyncClient
 
 pytest.importorskip("anthropic")
 
-from computer_use_demo import worker_api
+from computer_use_demo import worker_api  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
