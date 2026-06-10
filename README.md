@@ -1,9 +1,10 @@
 # Claude Computer Use Session Orchestrator
 
-A production-style FastAPI orchestration prototype for running Claude Computer
-Use as isolated, session-based backend workloads. The system creates one Docker
-desktop worker per session, streams agent activity over SSE, exposes the worker
-desktop through noVNC, and persists history in SQLite or PostgreSQL.
+A production-style SaaS-oriented FastAPI orchestration prototype for running
+Claude Computer Use as isolated, session-based backend workloads. The system
+creates one Docker desktop worker per session, streams agent activity over SSE,
+exposes the worker desktop through noVNC, and persists history in SQLite or
+PostgreSQL.
 
 This is not a hosted SaaS yet. It is a SaaS-oriented backend architecture
 exercise: tenancy, ownership checks, lifecycle limits, protected UI access,
@@ -147,13 +148,18 @@ versions where dependencies provide wheels.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-pip install -r dev-requirements.txt
+python -m pip install -r computer_use_demo/requirements.txt
+python -m pip install -r dev-requirements.txt
 
 export ANTHROPIC_API_KEY="your_anthropic_api_key"
 make build-worker
 make run-api
 ```
+
+`computer_use_demo/requirements.txt` is the main runtime dependency file. It
+contains FastAPI, Alembic, SQLAlchemy, psycopg, Anthropic SDK dependencies, and
+worker/runtime libraries. The root `requirements.txt` is kept as a compatibility
+shim that points to the runtime file.
 
 In another terminal:
 
@@ -304,7 +310,7 @@ Key variables are listed in [.env.example](.env.example). The main groups are:
 8. Send a task, for example:
 
 ```text
-Open Firefox and search for the current weather in Tokyo.
+Open a browser, search for the current weather in Tokyo, and tell me the temperature.
 ```
 
 9. Point out live SSE events: `assistant_block`, `tool_use_start`,

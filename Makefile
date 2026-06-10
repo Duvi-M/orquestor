@@ -6,7 +6,7 @@ PYTHON ?= .venv/bin/python
 
 install:
 	python3 -m venv .venv
-	.venv/bin/pip install -r requirements.txt
+	.venv/bin/pip install -r computer_use_demo/requirements.txt
 	.venv/bin/pip install -r dev-requirements.txt
 
 test:

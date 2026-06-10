@@ -30,7 +30,7 @@ Open `http://127.0.0.1:5173`.
 4. Send a task:
 
 ```text
-Open Firefox and search for the current weather in Tokyo.
+Open a browser, search for the current weather in Tokyo, and tell me the temperature.
 ```
 
 5. Narrate the timeline:
