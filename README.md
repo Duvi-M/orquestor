@@ -96,8 +96,9 @@ HTML/JS frontend
   easy to inspect. It is a demo console, not a full product UI.
 - Worker reattachment after orchestrator restart is documented as a future
   improvement. Current in-memory session state is paired with persisted history.
-- API token auth is deliberately simple. There are no accounts, OAuth, roles, or
-  multi-tenant ownership checks.
+- API token auth is deliberately simple. Local users, organizations, and
+  ownership checks exist for SaaS shape, but there are no OAuth flows, roles, or
+  production account-management features yet.
 
 ## Security Model
 
@@ -231,6 +232,43 @@ FastAPI app does not need direct Docker socket access.
 Future launcher names are roadmap placeholders only and are not implemented:
 `ecs_fargate`, `fly_machines`, `remote_launcher`, and `kubernetes`.
 
+### Observability Baseline
+
+Every HTTP response includes an `X-Request-Id` header. If the client sends
+`X-Request-Id`, the orchestrator echoes it; otherwise it generates a UUID.
+Request logs include the request ID, method, path, status, and duration. Query
+strings are intentionally omitted from request logs so signed UI tokens are not
+written to logs.
+
+Logs use normal text formatting by default. Set `LOG_FORMAT=json` to emit one
+JSON object per line for easier ingestion by a future log collector:
+
+```bash
+export LOG_FORMAT=json
+```
+
+Readiness and lightweight operational visibility are exposed through:
+
+```http
+GET /readyz
+GET /metrics
+GET /admin/sessions
+```
+
+`/readyz` reports safe configuration and dependency state: database reachability,
+configured worker launcher, worker image name, auth mode, and protected UI mode.
+It does not expose API keys, UI token secrets, or bearer tokens.
+
+`/metrics` returns a small JSON snapshot for local demos and smoke checks:
+active sessions, sessions created, failed sessions, active workers, worker start
+failures, messages, quota events, expiration events, launcher type, protected UI
+state, and global kill switch state.
+
+`/admin/sessions` returns active session and worker summaries without message
+contents or secrets. It is protected by `ORCHESTRATOR_API_TOKEN` when that token
+is configured. Production deployments should replace this with real admin auth
+before exposing it beyond a trusted network.
+
 See [SECURITY.md](SECURITY.md) for the Docker socket risk, noVNC/VNC assumptions,
 and future hardening options.
 
@@ -331,6 +369,7 @@ Runtime configuration is centralized in `computer_use_demo/api/config.py`.
 | `ENABLE_STREAMLIT` | `false` | Enables the legacy/debug Streamlit UI inside workers. |
 | `VNC_PASSWORD` | empty | Optional VNC password for worker desktop access. |
 | `LOG_LEVEL` | `INFO` | Python logging level. |
+| `LOG_FORMAT` | `text` | Log output format. Use `json` for single-line structured logs. |
 | `CORS_ALLOWED_ORIGINS` | localhost frontend origins | Comma-separated CORS allowlist. |
 | `CLEANUP_ORPHAN_WORKERS_ON_STARTUP` | `false` | Remove project-labeled workers at startup. |
 | `SESSION_TTL_SECONDS` | `300` | Legacy idle fallback used only when `MAX_IDLE_SESSION_SECONDS` is unset. |
@@ -358,12 +397,15 @@ GET    /sessions/{id}/history
 
 GET    /healthz
 GET    /readyz
+GET    /metrics
+GET    /admin/sessions
 ```
 
-`/healthz`, `/readyz`, and `/docs` are public local diagnostics. Session-scoped
-endpoints are protected when `ORCHESTRATOR_API_TOKEN` is configured and always
-enforce local development ownership with `X-User-Id` / `X-Org-Id` or the
-`DEV_USER_ID` / `DEV_ORG_ID` fallbacks.
+`/healthz`, `/readyz`, `/metrics`, and `/docs` are public local diagnostics.
+`/admin/sessions` is bearer-token protected when `ORCHESTRATOR_API_TOKEN` is
+configured. Session-scoped endpoints are protected when the token is configured
+and always enforce local development ownership with `X-User-Id` / `X-Org-Id` or
+the `DEV_USER_ID` / `DEV_ORG_ID` fallbacks.
 
 ## Development Commands
 
@@ -433,6 +475,17 @@ make test-all
 10. Refresh the frontend and load `History`.
 11. Delete a session and show worker cleanup logs.
 
+During a local demo, keep an eye on:
+
+- `X-Request-Id` in browser/API responses when tracing a specific action.
+- `/readyz` before the demo starts to confirm SQLite and launcher config.
+- `/metrics` after creating and deleting sessions to confirm active session and
+  worker counts move as expected.
+- `/admin/sessions` while a session is active to confirm worker metadata without
+  exposing message contents.
+- API logs for lifecycle events such as startup, worker creation, expiration,
+  quota rejection, session delete, and worker cleanup.
+
 ## Screenshots And GIFs
 
 Recommended portfolio assets:
@@ -452,6 +505,10 @@ text, reviewer names, or browser tabs with personal information.
 - VNC/noVNC is local-first and not intended for public exposure.
 - The frontend is a dependency-free demo console, not a polished SaaS UI.
 - API token auth is intentionally simple and not a user/account system.
+- `/metrics` is a lightweight JSON snapshot, not a Prometheus-compatible scrape
+  endpoint.
+- `/admin/sessions` is for trusted local/internal debugging and does not include
+  roles, audit trails, or production admin authorization.
 
 ## Future Roadmap
 
@@ -462,7 +519,8 @@ text, reviewer names, or browser tabs with personal information.
 - Add a worker-launch sidecar or Docker API proxy to reduce socket exposure.
 - Add richer event timeline with screenshot thumbnails and task duration.
 - Add WebSocket streaming alternative for clients that prefer bidirectional flows.
-- Add structured metrics/tracing behind an optional local flag.
+- Add Prometheus/OpenTelemetry-compatible metrics and tracing behind a production
+  deployment profile.
 - Add deployment notes for a safer single-host demo environment.
 - Add portfolio screenshots and a short two-session GIF.
 - Add packaging for reproducible demo releases.

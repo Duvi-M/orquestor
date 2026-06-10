@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -43,6 +44,10 @@ from computer_use_demo.api.worker_launcher import (
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id",
+    default="-",
+)
 
 app = FastAPI(title="Computer Use Backend (Challenge)", version="0.1.0")
 
@@ -53,6 +58,63 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx.get()
+        return True
+
+
+class JsonLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": getattr(record, "request_id", "-"),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, separators=(",", ":"))
+
+
+def configure_logging() -> None:
+    settings = get_settings()
+    handler = logging.StreamHandler()
+    handler.addFilter(RequestIdFilter())
+    if settings.log_format == "json":
+        handler.setFormatter(JsonLogFormatter())
+    else:
+        handler.setFormatter(
+            logging.Formatter(
+                "%(levelname)s:%(name)s:%(message)s request_id=%(request_id)s"
+            )
+        )
+    root_logger = logging.getLogger()
+    root_logger.handlers = [handler]
+    root_logger.setLevel(settings.log_level)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    token = request_id_ctx.set(request_id)
+    started_at = time.monotonic()
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        logger.info(
+            "http_request request_id=%s method=%s path=%s status_code=%s duration_ms=%.2f",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            (time.monotonic() - started_at) * 1000,
+        )
+        return response
+    finally:
+        request_id_ctx.reset(token)
 
 SESSION_TTL_SECONDS = settings.session_ttl_seconds
 CLEANUP_EVERY_SECONDS = settings.cleanup_every_seconds
@@ -219,6 +281,51 @@ class ReadyResponse(BaseModel):
     ok: bool
     status: str
     db_path: str
+    database_reachable: bool
+    worker_launcher: str
+    worker_image: str
+    worker_image_configured: bool
+    auth_mode: str
+    protected_ui_enabled: bool
+
+
+class MetricsResponse(BaseModel):
+    active_sessions: int
+    sessions_created_total: int
+    sessions_failed_total: int
+    workers_active: int
+    worker_start_failures_total: int
+    messages_total: int
+    quota_exceeded_total: int
+    session_expired_total: int
+    launcher_type: str
+    protected_ui_enabled: bool
+    global_kill_switch_enabled: bool
+
+
+class AdminWorkerSummary(BaseModel):
+    name: str
+    host: str
+    vnc: int
+    novnc: int
+    streamlit: int
+    http: int
+
+
+class AdminSessionSummary(BaseModel):
+    session_id: str
+    user_id: str | None
+    organization_id: str | None
+    status: str | None
+    busy: bool
+    created_at: float | None
+    last_activity: float | None
+    worker: AdminWorkerSummary | None
+
+
+class AdminSessionsResponse(BaseModel):
+    active_sessions: int
+    sessions: list[AdminSessionSummary]
 
 
 @dataclass
@@ -496,6 +603,58 @@ def _enforce_session_message_limits(session_id: str, s: SessionState) -> None:
         raise HTTPException(status_code=429, detail="Session message limit exceeded")
 
 
+def _db_count(sql: str, params: tuple[Any, ...] = ()) -> int:
+    conn = get_conn()
+    try:
+        row = conn.execute(sql, params).fetchone()
+        return int(row[0]) if row is not None else 0
+    finally:
+        conn.close()
+
+
+def _active_session_items() -> list[tuple[str, SessionState, dict[str, Any] | None]]:
+    items = []
+    for session_id, session in list(SESSIONS.items()):
+        record = get_session_record(session_id)
+        status = None if record is None else str(record.get("status") or "")
+        if not _is_terminal_status(status):
+            items.append((session_id, session, record))
+    return items
+
+
+def _metrics_payload() -> dict[str, Any]:
+    settings = get_settings()
+    active_items = _active_session_items()
+    return {
+        "active_sessions": len(active_items),
+        "sessions_created_total": _db_count("SELECT COUNT(*) FROM sessions"),
+        "sessions_failed_total": _db_count(
+            "SELECT COUNT(*) FROM sessions WHERE status IN (?, ?)",
+            (STATUS_FAILED, LEGACY_STATUS_ERROR),
+        ),
+        "workers_active": sum(1 for _sid, session, _record in active_items if session.worker),
+        "worker_start_failures_total": _db_count(
+            """
+            SELECT COUNT(*) FROM sessions
+            WHERE stop_reason IN (?, ?)
+            """,
+            ("worker_startup_failed", "worker_readiness_failed"),
+        ),
+        "messages_total": _db_count("SELECT COUNT(*) FROM messages"),
+        "quota_exceeded_total": _db_count(
+            "SELECT COUNT(*) FROM events WHERE event = ?",
+            ("quota_exceeded",),
+        ),
+        "session_expired_total": _db_count(
+            "SELECT COUNT(*) FROM events WHERE event = ?",
+            ("session_expired",),
+        ),
+        "launcher_type": settings.worker_launcher,
+        "protected_ui_enabled": settings.protect_session_ui,
+        "global_kill_switch_enabled": settings.global_kill_switch,
+    }
+
+
 async def _cleanup_sessions_loop() -> None:
     while True:
         now = time.time()
@@ -568,17 +727,19 @@ def _parse_sse_block(block: str) -> tuple[str | None, dict[str, Any] | None, str
 
 @app.on_event("startup")
 async def startup() -> None:
-    logging.basicConfig(level=get_settings().log_level)
+    configure_logging()
     init_db()
     if get_settings().cleanup_orphan_workers_on_startup:
         cleaned = get_worker_launcher().cleanup_orphans()
         logger.info("startup_orphan_cleanup containers_removed=%s", cleaned)
     logger.info(
-        "app_startup app=computer-use-orchestrator db_path=%s cleanup_orphans=%s auth_enabled=%s cors_origins=%s",
+        "app_startup app=computer-use-orchestrator db_path=%s cleanup_orphans=%s auth_enabled=%s cors_origins=%s worker_launcher=%s protected_ui=%s",
         get_settings().computer_use_db_path,
         get_settings().cleanup_orphan_workers_on_startup,
         bool(get_settings().orchestrator_api_token),
         ",".join(get_settings().cors_allowed_origins),
+        get_settings().worker_launcher,
+        get_settings().protect_session_ui,
     )
     if not get_settings().orchestrator_api_token:
         logger.warning("orchestrator_api_unprotected reason=ORCHESTRATOR_API_TOKEN_unset")
@@ -607,6 +768,52 @@ async def readyz() -> dict[str, Any]:
         "ok": True,
         "status": "ready",
         "db_path": str(settings.computer_use_db_path),
+        "database_reachable": True,
+        "worker_launcher": settings.worker_launcher,
+        "worker_image": settings.worker_image,
+        "worker_image_configured": bool(settings.worker_image),
+        "auth_mode": "token_protected" if settings.orchestrator_api_token else "local_dev",
+        "protected_ui_enabled": settings.protect_session_ui,
+    }
+
+
+@app.get("/metrics", response_model=MetricsResponse)
+async def metrics() -> dict[str, Any]:
+    return _metrics_payload()
+
+
+@app.get(
+    "/admin/sessions",
+    response_model=AdminSessionsResponse,
+    dependencies=[Depends(require_orchestrator_token)],
+)
+async def admin_sessions() -> dict[str, Any]:
+    summaries = []
+    for session_id, session, record in _active_session_items():
+        summaries.append(
+            {
+                "session_id": session_id,
+                "user_id": None if record is None else record.get("user_id"),
+                "organization_id": None if record is None else record.get("organization_id"),
+                "status": None if record is None else record.get("status"),
+                "busy": _session_busy(session),
+                "created_at": None if record is None else record.get("created_at"),
+                "last_activity": None if record is None else record.get("last_activity"),
+                "worker": None
+                if not session.worker
+                else {
+                    "name": session.worker.name,
+                    "host": session.worker.host,
+                    "vnc": session.worker.vnc,
+                    "novnc": session.worker.novnc,
+                    "streamlit": session.worker.streamlit,
+                    "http": session.worker.http,
+                },
+            }
+        )
+    return {
+        "active_sessions": len(summaries),
+        "sessions": summaries,
     }
 
 
@@ -871,8 +1078,10 @@ async def create_session(
 
     update_session_status(session_id, STATUS_READY)
     logger.info(
-        "session_created session_id=%s worker=%s host=%s vnc_port=%s novnc_port=%s streamlit_port=%s http_port=%s",
+        "session_created session_id=%s user_id=%s organization_id=%s worker=%s host=%s vnc_port=%s novnc_port=%s streamlit_port=%s http_port=%s",
         session_id,
+        current_identity.user_id,
+        current_identity.organization_id,
         s.worker.name,
         s.worker.host,
         s.worker.vnc,
@@ -905,8 +1114,10 @@ async def delete_session(
     _authorize_session(session_id, current_identity)
     s = _get_session(session_id)
     logger.info(
-        "session_delete_requested session_id=%s busy=%s worker=%s",
+        "session_delete_requested session_id=%s user_id=%s organization_id=%s busy=%s worker=%s",
         session_id,
+        current_identity.user_id,
+        current_identity.organization_id,
         _session_busy(s),
         None if not s.worker else s.worker.name,
     )
@@ -920,7 +1131,12 @@ async def delete_session(
         message="Session deleted; worker stopped",
         stop_reason="user_deleted",
     )
-    logger.info("session_deleted session_id=%s", session_id)
+    logger.info(
+        "session_deleted session_id=%s user_id=%s organization_id=%s",
+        session_id,
+        current_identity.user_id,
+        current_identity.organization_id,
+    )
     return {"ok": True}
 
 

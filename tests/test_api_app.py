@@ -1,8 +1,33 @@
+import logging
+
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from computer_use_demo.api import main
 from computer_use_demo.api.main import _parse_sse_block, app
 from computer_use_demo.api.worker_manager import WorkerInfo
+
+
+@pytest.fixture(autouse=True)
+def isolate_api_config_env(monkeypatch):
+    for name in (
+        "ORCHESTRATOR_API_TOKEN",
+        "GLOBAL_KILL_SWITCH",
+        "PLATFORM_DISABLE_NEW_SESSIONS",
+        "ORG_DISABLE_NEW_SESSIONS",
+        "PROTECT_SESSION_UI",
+        "UI_TOKEN_SECRET",
+        "UI_TOKEN_TTL_SECONDS",
+        "MAX_CONCURRENT_SESSIONS_PER_USER",
+        "MAX_CONCURRENT_SESSIONS_PER_ORG",
+        "MAX_SESSION_RUNTIME_SECONDS",
+        "MAX_IDLE_SESSION_SECONDS",
+        "MAX_MESSAGES_PER_SESSION",
+        "MAX_EVENTS_PER_SESSION",
+        "WORKER_LAUNCHER",
+        "LOG_FORMAT",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _fake_worker(session_id: str, suffix: int = 1) -> WorkerInfo:
@@ -57,15 +82,164 @@ async def test_healthz():
     assert response.json() == {"ok": True, "status": "healthy"}
 
 
+async def test_request_id_header_exists():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.get("/healthz", headers={"X-Request-Id": "req-test-123"})
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-Id"] == "req-test-123"
+
+
 async def test_readyz(tmp_path, monkeypatch):
     monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "ready.db"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("UI_TOKEN_SECRET", "ui-secret")
+    monkeypatch.setenv("ORCHESTRATOR_API_TOKEN", "token-secret")
+    monkeypatch.setenv("PROTECT_SESSION_UI", "true")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
         response = await client.get("/readyz")
 
     assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert response.json()["status"] == "ready"
+    data = response.json()
+    assert data["ok"] is True
+    assert data["status"] == "ready"
+    assert data["database_reachable"] is True
+    assert data["worker_launcher"] == "local_docker"
+    assert data["worker_image"] == "computer-use-demo:local"
+    assert data["worker_image_configured"] is True
+    assert data["auth_mode"] == "token_protected"
+    assert data["protected_ui_enabled"] is True
+    assert "anthropic-secret" not in response.text
+    assert "ui-secret" not in response.text
+    assert "token-secret" not in response.text
+
+
+async def test_metrics_endpoint_returns_expected_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "metrics.db"))
+    monkeypatch.setenv("PROTECT_SESSION_UI", "false")
+    monkeypatch.delenv("UI_TOKEN_SECRET", raising=False)
+    main.SESSIONS.clear()
+    main.init_db()
+    session_id = "session-metrics"
+    main.insert_session(session_id)
+    main.update_session_status(session_id, "ready")
+    main.insert_message(session_id, "user", "hello")
+    main.insert_event(session_id, "quota_exceeded", {"quota": "test"})
+    main.insert_event(session_id, "session_expired", {"reason": "test"})
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=_fake_worker(session_id),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.get("/metrics")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["active_sessions"] == 1
+    assert data["workers_active"] == 1
+    assert data["sessions_created_total"] == 1
+    assert data["messages_total"] == 1
+    assert data["quota_exceeded_total"] == 1
+    assert data["session_expired_total"] == 1
+    assert data["launcher_type"] == "local_docker"
+    assert data["protected_ui_enabled"] is False
+    assert data["global_kill_switch_enabled"] is False
+    main.SESSIONS.clear()
+
+
+@pytest.mark.parametrize(
+    ("protect_session_ui", "expected"),
+    [
+        ("false", False),
+        ("true", True),
+    ],
+)
+async def test_metrics_reflects_protected_ui_config(
+    tmp_path,
+    monkeypatch,
+    protect_session_ui,
+    expected,
+):
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / f"metrics-ui-{expected}.db"))
+    monkeypatch.setenv("PROTECT_SESSION_UI", protect_session_ui)
+    monkeypatch.setenv("UI_TOKEN_SECRET", "controlled-ui-secret")
+    main.SESSIONS.clear()
+    main.init_db()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.json()["protected_ui_enabled"] is expected
+    main.SESSIONS.clear()
+
+
+async def test_admin_sessions_requires_token_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATOR_API_TOKEN", "test-token")
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "admin-protected.db"))
+    main.SESSIONS.clear()
+    main.init_db()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.get("/admin/sessions")
+
+    assert response.status_code == 401
+
+
+async def test_admin_sessions_omits_message_contents(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "admin-sessions.db"))
+    main.SESSIONS.clear()
+    main.init_db()
+    session_id = "session-admin"
+    main.insert_session(session_id, user_id="user-a", organization_id="org-a")
+    main.insert_message(session_id, "user", "secret message text")
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=_fake_worker(session_id),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.get("/admin/sessions")
+
+    assert response.status_code == 200
+    assert response.json()["active_sessions"] == 1
+    assert "secret message text" not in response.text
+    main.SESSIONS.clear()
+
+
+async def test_request_logs_do_not_include_raw_ui_token(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "log-token.db"))
+    monkeypatch.setenv("PROTECT_SESSION_UI", "true")
+    monkeypatch.setenv("UI_TOKEN_SECRET", "test-ui-secret")
+    raw_token = "raw-token-that-should-not-be-logged"
+    main.SESSIONS.clear()
+    main.init_db()
+    session_id = "session-log-token"
+    main.insert_session(session_id)
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=_fake_worker(session_id),
+    )
+
+    caplog.set_level(logging.INFO, logger="computer_use_demo.api.main")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.get(f"/sessions/{session_id}/ui?token={raw_token}")
+
+    assert response.status_code == 403
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert raw_token not in log_text
+    assert "test-ui-secret" not in log_text
+    main.SESSIONS.clear()
 
 
 async def test_session_request_passes_when_token_unset(tmp_path, monkeypatch):

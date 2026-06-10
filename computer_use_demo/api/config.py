@@ -87,6 +87,7 @@ class Settings:
     max_tokens: int = 4096
     enable_streamlit: str = "false"
     log_level: str = "INFO"
+    log_format: str = "text"
     session_ttl_seconds: int = 300
     cleanup_every_seconds: int = 30
     worker_ready_timeout_seconds: float = 25.0
@@ -134,6 +135,7 @@ def get_settings() -> Settings:
         max_tokens=_int_env("MAX_TOKENS", 4096),
         enable_streamlit=_str_env("ENABLE_STREAMLIT", "false"),
         log_level=_str_env("LOG_LEVEL", "INFO").upper(),
+        log_format=_str_env("LOG_FORMAT", "text").lower(),
         session_ttl_seconds=_int_env("SESSION_TTL_SECONDS", 300),
         cleanup_every_seconds=_int_env("CLEANUP_EVERY_SECONDS", 30),
         worker_ready_timeout_seconds=_float_env("WORKER_READY_TIMEOUT_SECONDS", 25.0),

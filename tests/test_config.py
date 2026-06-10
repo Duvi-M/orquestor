@@ -3,51 +3,58 @@ import pytest
 from computer_use_demo.api.config import ConfigError, get_settings
 
 
-def test_settings_defaults(monkeypatch):
-    for name in (
-        "ANTHROPIC_API_KEY",
-        "ORCHESTRATOR_API_TOKEN",
-        "DEV_USER_ID",
-        "DEV_ORG_ID",
-        "MAX_CONCURRENT_SESSIONS_PER_USER",
-        "MAX_CONCURRENT_SESSIONS_PER_ORG",
-        "MAX_SESSION_RUNTIME_SECONDS",
-        "MAX_IDLE_SESSION_SECONDS",
-        "MAX_MESSAGES_PER_SESSION",
-        "MAX_EVENTS_PER_SESSION",
-        "PLATFORM_DISABLE_NEW_SESSIONS",
-        "GLOBAL_KILL_SWITCH",
-        "ORG_DISABLE_NEW_SESSIONS",
-        "PROTECT_SESSION_UI",
-        "UI_TOKEN_SECRET",
-        "UI_TOKEN_TTL_SECONDS",
-        "COMPUTER_USE_DB_PATH",
-        "WORKER_LAUNCHER",
-        "PUBLIC_HOST",
-        "WORKER_CONNECT_HOST",
-        "WORKER_IMAGE",
-        "MODEL",
-        "TOOL_VERSION",
-        "MAX_TOKENS",
-        "ENABLE_STREAMLIT",
-        "LOG_LEVEL",
-        "SESSION_TTL_SECONDS",
-        "CLEANUP_EVERY_SECONDS",
-        "WORKER_READY_TIMEOUT_SECONDS",
-        "WORKER_READY_POLL_SECONDS",
-        "WORKER_STATUS_POLL_SECONDS",
-        "WORKER_CPU_LIMIT",
-        "WORKER_MEMORY_LIMIT",
-        "WORKER_PIDS_LIMIT",
-        "CLEANUP_ORPHAN_WORKERS_ON_STARTUP",
-        "SSE_RETRY_LIMIT",
-        "SSE_RETRY_INITIAL_BACKOFF_SECONDS",
-        "SSE_RETRY_MAX_BACKOFF_SECONDS",
-        "CORS_ALLOWED_ORIGINS",
-        "VNC_PASSWORD",
-    ):
+CONFIG_ENV_NAMES = (
+    "ANTHROPIC_API_KEY",
+    "ORCHESTRATOR_API_TOKEN",
+    "DEV_USER_ID",
+    "DEV_ORG_ID",
+    "MAX_CONCURRENT_SESSIONS_PER_USER",
+    "MAX_CONCURRENT_SESSIONS_PER_ORG",
+    "MAX_SESSION_RUNTIME_SECONDS",
+    "MAX_IDLE_SESSION_SECONDS",
+    "MAX_MESSAGES_PER_SESSION",
+    "MAX_EVENTS_PER_SESSION",
+    "PLATFORM_DISABLE_NEW_SESSIONS",
+    "GLOBAL_KILL_SWITCH",
+    "ORG_DISABLE_NEW_SESSIONS",
+    "PROTECT_SESSION_UI",
+    "UI_TOKEN_SECRET",
+    "UI_TOKEN_TTL_SECONDS",
+    "COMPUTER_USE_DB_PATH",
+    "WORKER_LAUNCHER",
+    "PUBLIC_HOST",
+    "WORKER_CONNECT_HOST",
+    "WORKER_IMAGE",
+    "MODEL",
+    "TOOL_VERSION",
+    "MAX_TOKENS",
+    "ENABLE_STREAMLIT",
+    "LOG_LEVEL",
+    "LOG_FORMAT",
+    "SESSION_TTL_SECONDS",
+    "CLEANUP_EVERY_SECONDS",
+    "WORKER_READY_TIMEOUT_SECONDS",
+    "WORKER_READY_POLL_SECONDS",
+    "WORKER_STATUS_POLL_SECONDS",
+    "WORKER_CPU_LIMIT",
+    "WORKER_MEMORY_LIMIT",
+    "WORKER_PIDS_LIMIT",
+    "CLEANUP_ORPHAN_WORKERS_ON_STARTUP",
+    "SSE_RETRY_LIMIT",
+    "SSE_RETRY_INITIAL_BACKOFF_SECONDS",
+    "SSE_RETRY_MAX_BACKOFF_SECONDS",
+    "CORS_ALLOWED_ORIGINS",
+    "VNC_PASSWORD",
+)
+
+
+@pytest.fixture(autouse=True)
+def isolate_config_env(monkeypatch):
+    for name in CONFIG_ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
 
+
+def test_settings_defaults():
     settings = get_settings()
 
     assert settings.public_host == "127.0.0.1"
@@ -56,6 +63,7 @@ def test_settings_defaults(monkeypatch):
     assert settings.worker_launcher == "local_docker"
     assert settings.max_tokens == 4096
     assert settings.log_level == "INFO"
+    assert settings.log_format == "text"
     assert settings.worker_cpu_limit == 1.0
     assert settings.worker_memory_limit == "2g"
     assert settings.worker_pids_limit == 512
@@ -90,6 +98,7 @@ def test_settings_reads_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WORKER_IMAGE", "worker:test")
     monkeypatch.setenv("MAX_TOKENS", "1234")
     monkeypatch.setenv("LOG_LEVEL", "debug")
+    monkeypatch.setenv("LOG_FORMAT", "json")
     monkeypatch.setenv("WORKER_CPU_LIMIT", "1.5")
     monkeypatch.setenv("WORKER_MEMORY_LIMIT", "3g")
     monkeypatch.setenv("WORKER_PIDS_LIMIT", "256")
@@ -135,6 +144,7 @@ def test_settings_reads_env(monkeypatch, tmp_path):
     assert settings.worker_image == "worker:test"
     assert settings.max_tokens == 1234
     assert settings.log_level == "DEBUG"
+    assert settings.log_format == "json"
     assert settings.worker_cpu_limit == 1.5
     assert settings.worker_memory_limit == "3g"
     assert settings.worker_pids_limit == 256
