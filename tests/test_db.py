@@ -27,7 +27,7 @@ def test_init_db_uses_configurable_path(tmp_path, monkeypatch):
         "messages",
         "events",
     }.issubset(tables)
-    assert {"status", "error", "completed_at"}.issubset(
+    assert {"status", "error", "stop_reason", "completed_at"}.issubset(
         {
             row[1]
             for row in conn.execute("PRAGMA table_info(sessions)")

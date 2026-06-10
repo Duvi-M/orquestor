@@ -297,3 +297,199 @@ async def test_different_user_org_cannot_delete_session(tmp_path, monkeypatch):
     assert stopped == []
     assert session_id in main.SESSIONS
     main.SESSIONS.clear()
+
+
+async def test_user_concurrent_session_limit(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "user-limit.db"))
+    monkeypatch.setenv("MAX_CONCURRENT_SESSIONS_PER_USER", "1")
+    monkeypatch.setenv("MAX_CONCURRENT_SESSIONS_PER_ORG", "10")
+    main.SESSIONS.clear()
+    main.init_db()
+    existing_session_id = "session-user-limit"
+    main.insert_session(existing_session_id, user_id="user-a", organization_id="org-a")
+    main.update_session_status(existing_session_id, "ready")
+    main.SESSIONS[existing_session_id] = main.SessionState(session_id=existing_session_id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.post(
+            "/sessions",
+            headers={"X-User-Id": "user-a", "X-Org-Id": "org-b"},
+        )
+
+    assert response.status_code == 429
+    assert "User concurrent session limit exceeded" in response.json()["detail"]
+    main.SESSIONS.clear()
+
+
+async def test_org_concurrent_session_limit(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "org-limit.db"))
+    monkeypatch.setenv("MAX_CONCURRENT_SESSIONS_PER_USER", "10")
+    monkeypatch.setenv("MAX_CONCURRENT_SESSIONS_PER_ORG", "1")
+    main.SESSIONS.clear()
+    main.init_db()
+    existing_session_id = "session-org-limit"
+    main.insert_session(existing_session_id, user_id="user-a", organization_id="org-a")
+    main.update_session_status(existing_session_id, "ready")
+    main.SESSIONS[existing_session_id] = main.SessionState(session_id=existing_session_id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.post(
+            "/sessions",
+            headers={"X-User-Id": "user-b", "X-Org-Id": "org-a"},
+        )
+
+    assert response.status_code == 429
+    assert "Organization concurrent session limit exceeded" in response.json()["detail"]
+    main.SESSIONS.clear()
+
+
+async def test_max_messages_per_session_limit(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "message-limit.db"))
+    monkeypatch.setenv("MAX_MESSAGES_PER_SESSION", "1")
+    main.SESSIONS.clear()
+    main.init_db()
+    session_id = "session-message-limit"
+    main.insert_session(session_id, user_id="user-a", organization_id="org-a")
+    main.update_session_status(session_id, "ready")
+    main.insert_message(session_id, "user", "first")
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=_fake_worker(session_id),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.post(
+            f"/sessions/{session_id}/messages",
+            json={"text": "second"},
+            headers={"X-User-Id": "user-a", "X-Org-Id": "org-a"},
+        )
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "Session message limit exceeded"
+    history = main.get_session_history(session_id)
+    assert history is not None
+    assert history["events"][0]["event"] == "quota_exceeded"
+    main.SESSIONS.clear()
+
+
+async def test_platform_kill_switch_rejects_new_sessions(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "kill-switch.db"))
+    monkeypatch.setenv("GLOBAL_KILL_SWITCH", "true")
+    main.SESSIONS.clear()
+    main.init_db()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.post("/sessions")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Global kill switch is enabled"
+    main.SESSIONS.clear()
+
+
+async def test_platform_kill_switch_rejects_messages(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "message-kill-switch.db"))
+    monkeypatch.setenv("GLOBAL_KILL_SWITCH", "true")
+    main.SESSIONS.clear()
+    main.init_db()
+    session_id = "session-message-kill"
+    main.insert_session(session_id, user_id="user-a", organization_id="org-a")
+    main.update_session_status(session_id, "ready")
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=_fake_worker(session_id),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.post(
+            f"/sessions/{session_id}/messages",
+            json={"text": "hello"},
+            headers={"X-User-Id": "user-a", "X-Org-Id": "org-a"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Global kill switch is enabled"
+    main.SESSIONS.clear()
+
+
+async def test_runtime_expired_session_stops_worker_and_rejects_message(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "runtime-expired.db"))
+    monkeypatch.setenv("MAX_SESSION_RUNTIME_SECONDS", "1")
+    main.SESSIONS.clear()
+    main.init_db()
+    session_id = "session-runtime-expired"
+    main.insert_session(session_id, user_id="user-a", organization_id="org-a")
+    main.update_session_status(session_id, "ready")
+    conn = main.get_conn()
+    conn.execute(
+        "UPDATE sessions SET created_at = created_at - 10 WHERE id = ?",
+        (session_id,),
+    )
+    conn.commit()
+    conn.close()
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=_fake_worker(session_id),
+    )
+    stopped = []
+    monkeypatch.setattr(main, "stop_worker", lambda name: stopped.append(name))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.post(
+            f"/sessions/{session_id}/messages",
+            json={"text": "hello"},
+            headers={"X-User-Id": "user-a", "X-Org-Id": "org-a"},
+        )
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "Session runtime limit exceeded"
+    assert stopped == [f"worker-{session_id}"]
+    assert session_id not in main.SESSIONS
+    history = main.get_session_history(session_id)
+    assert history is not None
+    assert history["session"]["status"] == "expired"
+    assert history["session"]["stop_reason"] == "runtime_limit_exceeded"
+    assert history["events"][0]["event"] == "session_expired"
+    main.SESSIONS.clear()
+
+
+async def test_expired_session_cannot_accept_message(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHESTRATOR_API_TOKEN", raising=False)
+    monkeypatch.setenv("COMPUTER_USE_DB_PATH", str(tmp_path / "already-expired.db"))
+    main.SESSIONS.clear()
+    main.init_db()
+    session_id = "session-already-expired"
+    main.insert_session(session_id, user_id="user-a", organization_id="org-a")
+    main.update_session_status(
+        session_id,
+        "expired",
+        completed=True,
+        stop_reason="idle_limit_exceeded",
+    )
+    main.SESSIONS[session_id] = main.SessionState(
+        session_id=session_id,
+        worker=_fake_worker(session_id),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://orchestrator") as client:
+        response = await client.post(
+            f"/sessions/{session_id}/messages",
+            json={"text": "hello"},
+            headers={"X-User-Id": "user-a", "X-Org-Id": "org-a"},
+        )
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == "Session has expired"
+    main.SESSIONS.clear()

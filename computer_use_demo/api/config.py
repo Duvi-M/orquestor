@@ -65,6 +65,15 @@ class Settings:
     orchestrator_api_token: str = field(default="", repr=False)
     dev_user_id: str = "dev-user"
     dev_org_id: str = "dev-org"
+    max_concurrent_sessions_per_user: int = 10
+    max_concurrent_sessions_per_org: int = 50
+    max_session_runtime_seconds: int = 3600
+    max_idle_session_seconds: int = 1800
+    max_messages_per_session: int = 100
+    max_events_per_session: int = 5000
+    platform_disable_new_sessions: bool = False
+    global_kill_switch: bool = False
+    org_disable_new_sessions: list[str] = field(default_factory=list)
     computer_use_db_path: Path = DEFAULT_DB_PATH
     public_host: str = "127.0.0.1"
     worker_connect_host: str = "127.0.0.1"
@@ -96,6 +105,18 @@ def get_settings() -> Settings:
         orchestrator_api_token=_str_env("ORCHESTRATOR_API_TOKEN"),
         dev_user_id=_required_str_env("DEV_USER_ID", "dev-user"),
         dev_org_id=_required_str_env("DEV_ORG_ID", "dev-org"),
+        max_concurrent_sessions_per_user=_int_env("MAX_CONCURRENT_SESSIONS_PER_USER", 10),
+        max_concurrent_sessions_per_org=_int_env("MAX_CONCURRENT_SESSIONS_PER_ORG", 50),
+        max_session_runtime_seconds=_int_env("MAX_SESSION_RUNTIME_SECONDS", 3600),
+        max_idle_session_seconds=_int_env(
+            "MAX_IDLE_SESSION_SECONDS",
+            _int_env("SESSION_TTL_SECONDS", 1800),
+        ),
+        max_messages_per_session=_int_env("MAX_MESSAGES_PER_SESSION", 100),
+        max_events_per_session=_int_env("MAX_EVENTS_PER_SESSION", 5000),
+        platform_disable_new_sessions=_bool_env("PLATFORM_DISABLE_NEW_SESSIONS", False),
+        global_kill_switch=_bool_env("GLOBAL_KILL_SWITCH", False),
+        org_disable_new_sessions=_csv_env("ORG_DISABLE_NEW_SESSIONS", ""),
         computer_use_db_path=Path(_str_env("COMPUTER_USE_DB_PATH", str(DEFAULT_DB_PATH))).expanduser(),
         public_host=_str_env("PUBLIC_HOST", "127.0.0.1"),
         worker_connect_host=_str_env("WORKER_CONNECT_HOST", "127.0.0.1"),

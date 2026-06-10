@@ -58,6 +58,7 @@ def init_db() -> None:
         last_activity REAL,
         status TEXT DEFAULT 'created',
         error TEXT,
+        stop_reason TEXT,
         completed_at REAL
     )
     """)
@@ -100,6 +101,7 @@ def _ensure_session_columns(conn: sqlite3.Connection) -> None:
         "organization_id": "TEXT",
         "status": "TEXT DEFAULT 'created'",
         "error": "TEXT",
+        "stop_reason": "TEXT",
         "completed_at": "REAL",
     }
     for name, definition in columns.items():
@@ -211,15 +213,20 @@ def update_session_status(
     status: str,
     error: str | None = None,
     completed: bool = False,
+    stop_reason: str | None = None,
 ) -> None:
     conn = get_conn()
     conn.execute(
         """
         UPDATE sessions
-        SET status = ?, error = ?, completed_at = CASE WHEN ? THEN ? ELSE completed_at END
+        SET
+            status = ?,
+            error = ?,
+            stop_reason = COALESCE(?, stop_reason),
+            completed_at = CASE WHEN ? THEN ? ELSE completed_at END
         WHERE id = ?
         """,
-        (status, error, completed, time.time(), session_id),
+        (status, error, stop_reason, completed, time.time(), session_id),
     )
     conn.commit()
     conn.close()
@@ -235,11 +242,53 @@ def insert_message(session_id: str, role: str, text: str) -> None:
     conn.close()
 
 
+def count_session_messages(session_id: str, role: str | None = None) -> int:
+    conn = get_conn()
+    if role is None:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM messages WHERE session_id = ? AND role = ?",
+            (session_id, role),
+        ).fetchone()
+    conn.close()
+    return int(row["count"])
+
+
+def count_session_events(session_id: str) -> int:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS count FROM events WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    conn.close()
+    return int(row["count"])
+
+
+def get_session_record(session_id: str) -> dict[str, Any] | None:
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT id, user_id, organization_id, created_at, last_activity, status,
+               error, stop_reason, completed_at
+        FROM sessions
+        WHERE id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+    conn.close()
+    return None if row is None else dict(row)
+
+
 def get_session_history(session_id: str) -> dict[str, Any] | None:
     conn = get_conn()
     session = conn.execute(
         """
-        SELECT id, user_id, organization_id, created_at, last_activity, status, error, completed_at
+        SELECT id, user_id, organization_id, created_at, last_activity, status,
+               error, stop_reason, completed_at
         FROM sessions
         WHERE id = ?
         """,

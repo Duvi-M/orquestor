@@ -64,6 +64,7 @@ async def test_one_active_task_per_session(monkeypatch):
         ),
     )
     main.insert_session(session_id)
+    main.update_session_status(session_id, "ready")
 
     async def slow_worker_message(_session_id, _session, _text):
         await asyncio.sleep(0.2)
@@ -194,7 +195,7 @@ async def test_worker_forward_failure_marks_session_error(monkeypatch):
 
     history = main.get_session_history(session_id)
     assert history is not None
-    assert history["session"]["status"] == "error"
+    assert history["session"]["status"] == "failed"
     assert "worker unavailable" in history["session"]["error"]
 
 
@@ -230,7 +231,7 @@ async def test_worker_startup_readiness_failure_is_persisted(monkeypatch):
     session_id = stopped[0].removeprefix("worker-")
     sessions = main.get_session_history(session_id)
     assert sessions is not None
-    assert sessions["session"]["status"] == "error"
+    assert sessions["session"]["status"] == "failed"
     assert sessions["events"][0]["event"] == "error"
     assert sessions["events"][0]["data"]["stage"] == "worker_readiness"
 
@@ -272,7 +273,7 @@ async def test_delete_session_stops_worker_and_persists_deleted_event(monkeypatc
     history = main.get_session_history(session_id)
     assert history is not None
     assert history["session"]["status"] == "deleted"
-    assert history["events"][0]["event"] == "deleted"
+    assert history["events"][0]["event"] == "session_deleted"
     with suppress(asyncio.CancelledError):
         await task
 

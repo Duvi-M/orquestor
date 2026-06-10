@@ -139,6 +139,28 @@ This is not production authentication. The future SaaS path is to replace this
 adapter with a real authenticated principal from an auth provider or OIDC layer,
 then keep the same ownership checks behind that dependency.
 
+### SaaS Safety Limits
+
+The orchestrator now has lightweight SaaS-style lifecycle controls around the
+existing one-worker-per-session flow. These controls are enforced server-side
+and do not require any frontend changes.
+
+- New sessions are rejected when the current user or organization reaches its
+  active concurrent session limit.
+- New sessions and messages are rejected when `PLATFORM_DISABLE_NEW_SESSIONS`
+  or `GLOBAL_KILL_SWITCH` is enabled.
+- Organizations listed in `ORG_DISABLE_NEW_SESSIONS` cannot create sessions or
+  send new messages.
+- Messages are rejected when the session is busy, expired, deleted, killed,
+  failed, over runtime, or over message quota.
+- Runtime and idle expiration stop the active worker, persist a final event,
+  and keep session history instead of silently deleting it.
+- Event persistence is capped by `MAX_EVENTS_PER_SESSION`; live SSE still flows
+  to the browser, but excess events are not stored in SQLite.
+
+These are quota and safety controls, not billing. A future billing phase should
+add a separate cost ledger and provider usage reconciliation.
+
 See [SECURITY.md](SECURITY.md) for the Docker socket risk, noVNC/VNC assumptions,
 and future hardening options.
 
@@ -216,6 +238,15 @@ Runtime configuration is centralized in `computer_use_demo/api/config.py`.
 | `ORCHESTRATOR_API_TOKEN` | empty | Optional bearer token for session-scoped API endpoints. |
 | `DEV_USER_ID` | `dev-user` | Local auth adapter fallback user when `X-User-Id` is absent. |
 | `DEV_ORG_ID` | `dev-org` | Local auth adapter fallback organization when `X-Org-Id` is absent. |
+| `MAX_CONCURRENT_SESSIONS_PER_USER` | `10` | Active in-memory session limit for one local dev/SaaS user. |
+| `MAX_CONCURRENT_SESSIONS_PER_ORG` | `50` | Active in-memory session limit for one organization. |
+| `MAX_SESSION_RUNTIME_SECONDS` | `3600` | Hard runtime cap before a session is expired and its worker is stopped. |
+| `MAX_IDLE_SESSION_SECONDS` | `1800` | Idle cap before a non-busy session is expired and its worker is stopped. |
+| `MAX_MESSAGES_PER_SESSION` | `100` | Maximum user messages accepted for one session. |
+| `MAX_EVENTS_PER_SESSION` | `5000` | Maximum worker events persisted for one session. |
+| `PLATFORM_DISABLE_NEW_SESSIONS` | `false` | Reject new sessions and new messages without stopping existing workers. |
+| `GLOBAL_KILL_SWITCH` | `false` | Reject new sessions and new messages as a platform-wide emergency switch. |
+| `ORG_DISABLE_NEW_SESSIONS` | empty | Comma-separated organization IDs blocked from new sessions/messages. |
 | `COMPUTER_USE_DB_PATH` | `data/orchestrator.db` | SQLite database path. |
 | `PUBLIC_HOST` | `127.0.0.1` | Host used when returning frontend/noVNC URLs. |
 | `WORKER_CONNECT_HOST` | `127.0.0.1` | Host the orchestrator uses to call worker HTTP APIs. |
@@ -228,7 +259,7 @@ Runtime configuration is centralized in `computer_use_demo/api/config.py`.
 | `LOG_LEVEL` | `INFO` | Python logging level. |
 | `CORS_ALLOWED_ORIGINS` | localhost frontend origins | Comma-separated CORS allowlist. |
 | `CLEANUP_ORPHAN_WORKERS_ON_STARTUP` | `false` | Remove project-labeled workers at startup. |
-| `SESSION_TTL_SECONDS` | `300` | Idle session cleanup threshold. |
+| `SESSION_TTL_SECONDS` | `300` | Legacy idle fallback used only when `MAX_IDLE_SESSION_SECONDS` is unset. |
 | `CLEANUP_EVERY_SECONDS` | `30` | Background session cleanup interval. |
 | `WORKER_READY_TIMEOUT_SECONDS` | `25.0` | Worker readiness timeout. |
 | `WORKER_READY_POLL_SECONDS` | `0.5` | Worker readiness polling interval. |

@@ -7,6 +7,17 @@ def test_settings_defaults(monkeypatch):
     for name in (
         "ANTHROPIC_API_KEY",
         "ORCHESTRATOR_API_TOKEN",
+        "DEV_USER_ID",
+        "DEV_ORG_ID",
+        "MAX_CONCURRENT_SESSIONS_PER_USER",
+        "MAX_CONCURRENT_SESSIONS_PER_ORG",
+        "MAX_SESSION_RUNTIME_SECONDS",
+        "MAX_IDLE_SESSION_SECONDS",
+        "MAX_MESSAGES_PER_SESSION",
+        "MAX_EVENTS_PER_SESSION",
+        "PLATFORM_DISABLE_NEW_SESSIONS",
+        "GLOBAL_KILL_SWITCH",
+        "ORG_DISABLE_NEW_SESSIONS",
         "COMPUTER_USE_DB_PATH",
         "PUBLIC_HOST",
         "WORKER_CONNECT_HOST",
@@ -43,6 +54,17 @@ def test_settings_defaults(monkeypatch):
     assert settings.worker_cpu_limit == 1.0
     assert settings.worker_memory_limit == "2g"
     assert settings.worker_pids_limit == 512
+    assert settings.dev_user_id == "dev-user"
+    assert settings.dev_org_id == "dev-org"
+    assert settings.max_concurrent_sessions_per_user == 10
+    assert settings.max_concurrent_sessions_per_org == 50
+    assert settings.max_session_runtime_seconds == 3600
+    assert settings.max_idle_session_seconds == 1800
+    assert settings.max_messages_per_session == 100
+    assert settings.max_events_per_session == 5000
+    assert settings.platform_disable_new_sessions is False
+    assert settings.global_kill_switch is False
+    assert settings.org_disable_new_sessions == []
     assert settings.cleanup_orphan_workers_on_startup is False
     assert settings.sse_retry_limit == 3
     assert settings.cors_allowed_origins == [
@@ -64,6 +86,17 @@ def test_settings_reads_env(monkeypatch, tmp_path):
     monkeypatch.setenv("WORKER_PIDS_LIMIT", "256")
     monkeypatch.setenv("CLEANUP_ORPHAN_WORKERS_ON_STARTUP", "true")
     monkeypatch.setenv("ORCHESTRATOR_API_TOKEN", "orchestrator-secret")
+    monkeypatch.setenv("DEV_USER_ID", "user-env")
+    monkeypatch.setenv("DEV_ORG_ID", "org-env")
+    monkeypatch.setenv("MAX_CONCURRENT_SESSIONS_PER_USER", "2")
+    monkeypatch.setenv("MAX_CONCURRENT_SESSIONS_PER_ORG", "4")
+    monkeypatch.setenv("MAX_SESSION_RUNTIME_SECONDS", "600")
+    monkeypatch.setenv("MAX_IDLE_SESSION_SECONDS", "300")
+    monkeypatch.setenv("MAX_MESSAGES_PER_SESSION", "8")
+    monkeypatch.setenv("MAX_EVENTS_PER_SESSION", "16")
+    monkeypatch.setenv("PLATFORM_DISABLE_NEW_SESSIONS", "true")
+    monkeypatch.setenv("GLOBAL_KILL_SWITCH", "true")
+    monkeypatch.setenv("ORG_DISABLE_NEW_SESSIONS", "org-a,org-b")
     monkeypatch.setenv("CORS_ALLOWED_ORIGINS", "http://one.test,http://two.test")
     monkeypatch.setenv("VNC_PASSWORD", "vnc-secret")
 
@@ -71,6 +104,17 @@ def test_settings_reads_env(monkeypatch, tmp_path):
 
     assert settings.anthropic_api_key == "test-secret"
     assert settings.orchestrator_api_token == "orchestrator-secret"
+    assert settings.dev_user_id == "user-env"
+    assert settings.dev_org_id == "org-env"
+    assert settings.max_concurrent_sessions_per_user == 2
+    assert settings.max_concurrent_sessions_per_org == 4
+    assert settings.max_session_runtime_seconds == 600
+    assert settings.max_idle_session_seconds == 300
+    assert settings.max_messages_per_session == 8
+    assert settings.max_events_per_session == 16
+    assert settings.platform_disable_new_sessions is True
+    assert settings.global_kill_switch is True
+    assert settings.org_disable_new_sessions == ["org-a", "org-b"]
     assert settings.computer_use_db_path == db_path
     assert settings.worker_image == "worker:test"
     assert settings.max_tokens == 1234
